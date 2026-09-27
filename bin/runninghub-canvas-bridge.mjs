@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Modified 2026-09-27: international setup and complete extension hashes.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -13,8 +14,8 @@ const serverScript = resolve(repoRoot, "server/server.mjs");
 const extensionDir = resolve(repoRoot, "extension");
 const configDir = resolve(homedir(), ".runninghub-canvas-bridge");
 const reportPath = resolve(configDir, "diagnostic-report.json");
-const bridgeUrl = process.env.RH_BRIDGE_URL || "http://127.0.0.1:8765";
-const issueUrl = packageJson.bugs?.url || "https://github.com/windzu/runninghub-canvas-bridge/issues";
+const bridgeUrl = process.env.RH_BRIDGE_URL || "http://127.0.0.1:18765";
+const issueUrl = packageJson.bugs?.url || "https://github.com/limyum-creator/runninghub-canvas-bridge/issues";
 
 const command = process.argv[2] || "help";
 const args = process.argv.slice(3);
@@ -84,10 +85,10 @@ const setup = () => {
     extension: {
       unpackedPath: extensionDir,
       installSteps: [
-        "Open chrome://extensions/ in the Chrome profile logged in to RunningHub.",
+        "Open chrome://extensions/ (or edge://extensions/) in the profile logged in to RunningHub.",
         "Enable Developer mode.",
         "Click Load unpacked and select the extension unpackedPath.",
-        "Open or refresh https://rhtv.runninghub.cn/projects/canvas/<canvas_id>.",
+        "Open https://www.runninghub.ai/project/canvas/<canvas_id> (or a supported China-site canvas).",
         "Allow Chrome local-network access if prompted so the page can reach 127.0.0.1."
       ]
     },
@@ -102,7 +103,7 @@ const setup = () => {
 const extensionInfo = () => {
   const manifestPath = resolve(extensionDir, "manifest.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  const files = ["manifest.json", "bridge-main.js"];
+  const files = ["manifest.json", "site-policy.js", "bridge-main.js"];
   const hash = createHash("sha256");
   for (const file of files) hash.update(readFileSync(resolve(extensionDir, file)));
   print({

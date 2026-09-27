@@ -1,4 +1,8 @@
+// Modified 2026-09-27: international routing, guarded editing, current sync protocol.
 (() => {
+  const SITE_POLICY = globalThis.RHCanvasSitePolicy;
+  if (!SITE_POLICY?.parseCanvas(location.href)) return;
+  const ACCESS = window.__RUNNINGHUB_CANVAS_BRIDGE_ACCESS__ || {};
   const RUNTIME_VERSION = window.__RUNNINGHUB_CANVAS_BRIDGE_EXPECTED_VERSION__ || "dev";
   const LOADER_VERSION = window.__RUNNINGHUB_CANVAS_BRIDGE_LOADER_VERSION__ || "unknown";
   const PROTOCOL_VERSION = window.__RUNNINGHUB_CANVAS_BRIDGE_PROTOCOL_VERSION__ || "1";
@@ -11,7 +15,7 @@
   window.__RUNNINGHUB_CANVAS_BRIDGE_INSTALLED__ = true;
   window.__RUNNINGHUB_CANVAS_BRIDGE_VERSION__ = RUNTIME_VERSION;
 
-  const BRIDGE = "http://127.0.0.1:8765";
+  const BRIDGE = "http://127.0.0.1:18765";
   const CLIENT_ID = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   let seq = 0;
   let pollTimer;
@@ -39,8 +43,7 @@
     return "COMMAND_FAILED";
   };
 
-  const shouldCapture = (url) =>
-    /openclaw|canvas\/workflow|canvas\/task|canvas\/getCanvasDetail|canvas\/create|canvas\/rename/i.test(String(url || ""));
+  const shouldCapture = () => false; // No passive capture of private prompts or API payloads.
 
   const redactHeaders = (headers) => {
     const out = {};
@@ -86,18 +89,42 @@
     }).catch(() => {});
   };
 
-  const authHeaders = () => {
-    const headers = { "Content-Type": "application/json" };
+  const sessionToken = () => {
+    const cookie = document.cookie.split(";").map((part) => part.trim())
+      .find((part) => part.startsWith("Rh-Accesstoken="));
+    let cookieValue = cookie ? cookie.slice("Rh-Accesstoken=".length) : "";
+    try { cookieValue = decodeURIComponent(cookieValue); } catch {}
+    const candidates = [cookieValue, localStorage.getItem("Rh-Accesstoken") || ""].filter(Boolean);
+    for (const value of candidates) {
+      try {
+        const part = value.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+        const payload = JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, "=")));
+        if (payload.exp && Date.now() >= payload.exp * 1000) continue;
+      } catch {}
+      return value;
+    }
+    throw new Error("Rh-Accesstoken unavailable or expired");
+  };
+  const sessionUserId = (token) => {
     try {
-      const token = localStorage.getItem("Rh-Accesstoken");
+      const part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+      return String(JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, "="))).sub || "");
+    } catch { return ""; }
+  };
+  const authHeaders = () => {
+    const headers = { "Content-Type": "application/json", version: "1.0.0" };
+    try {
+      const token = sessionToken();
       if (token) headers.Authorization = `Bearer ${token}`;
+      const teamId = localStorage.getItem("currentTeamId");
+      if (teamId && teamId !== "0" && teamId !== "null") headers["X-Team-Id"] = teamId;
     } catch {}
     return headers;
   };
 
   const summarizeGraph = () => ({
-    canvasId: location.pathname.split("/").filter(Boolean).pop(),
-    nodes: Array.from(document.querySelectorAll(".vue-flow__node")).map((el) => ({
+    canvasId: SITE_POLICY.parseCanvas(location.href)?.canvasId,
+    nodes: Array.from(document.querySelectorAll(".react-flow__node, .vue-flow__node")).map((el) => ({
       dataId: el.getAttribute("data-id"),
       className: String(el.className),
       text: (el.innerText || el.textContent || "").trim().slice(0, 500),
@@ -106,14 +133,17 @@
         return { x: r.x, y: r.y, width: r.width, height: r.height };
       })()
     })),
-    edges: Array.from(document.querySelectorAll(".vue-flow__edge")).map((el) => ({
+    edges: Array.from(document.querySelectorAll(".react-flow__edge, .vue-flow__edge")).map((el) => ({
       dataId: el.getAttribute("data-id"),
       className: String(el.className)
     }))
   });
 
   const postJson = async (endpoint, body, maxChars) => {
-    const response = await fetch(endpoint, {
+    const apiOrigin = SITE_POLICY.parseCanvas(location.href).apiOrigin;
+    const target = new URL(endpoint, apiOrigin);
+    if (target.origin !== apiOrigin || !target.pathname.startsWith("/canvas/")) throw new Error("Cross-site API request blocked");
+    const response = await fetch(target, {
       method: "POST",
       headers: authHeaders(),
       credentials: "include",
@@ -151,14 +181,7 @@
   };
 
   let yjsModulePromise;
-  const loadYjs = async () => {
-    yjsModulePromise ||= Promise.all([
-      import("https://esm.sh/yjs@13.6.30"),
-      import("https://esm.sh/y-websocket@1.5.4?deps=yjs@13.6.30")
-    ]);
-    const [Y, yWebsocket] = await yjsModulePromise;
-    return { Y, WebsocketProvider: yWebsocket.WebsocketProvider };
-  };
+  const loadYjs = () => yjsModulePromise ||= import(`${BRIDGE}/vendor/yjs.js`);
 
   const toYValue = (Y, value) => {
     if (Array.isArray(value)) {
@@ -174,58 +197,76 @@
     return value;
   };
 
-  const withCanvasYjs = async (fn) => {
-    const { Y, WebsocketProvider } = await loadYjs();
-    const canvasId = location.pathname.split("/").filter(Boolean).pop();
-    const token = localStorage.getItem("Rh-Accesstoken");
-    if (!canvasId) throw new Error("canvasId not found in location");
-    if (!token) throw new Error("Rh-Accesstoken not found");
-
-    const detail = await fetch("/canvas/getCanvasDetail", {
-      method: "POST",
-      headers: authHeaders(),
-      credentials: "include",
-      body: JSON.stringify({ id: canvasId })
-    }).then((response) => response.json());
-    const userId = detail?.data?.user_id;
-    if (!userId) throw new Error("user_id not found in canvas detail");
-
-    const doc = new Y.Doc();
-    const provider = new WebsocketProvider("wss://rhtv.runninghub.cn/canvas/ws", canvasId, doc, {
-      params: { roomId: canvasId, userId, token, type: "canvas", yjsClientId: String(doc.clientID) }
-    });
-    try {
-      const synced = await new Promise((resolve) => {
-        const timer = setTimeout(() => resolve(false), 10000);
-        provider.on("sync", (isSynced) => {
-          if (isSynced) {
-            clearTimeout(timer);
-            resolve(true);
-          }
-        });
+  const withCanvasYjs = async (fn, { write = false } = {}) => {
+    const site = SITE_POLICY.parseCanvas(location.href);
+    if (!site) throw new Error("Unsupported canvas URL");
+    if (write) {
+      const denied = SITE_POLICY.authorizeCommand({ type: "canvas.updateNode" }, ACCESS, site);
+      if (denied) throw new Error(denied);
+    }
+    const { Y, WebsocketProvider, decoding, messageYjsSyncStep1 } = await loadYjs();
+    const { canvasId } = site;
+    const token = sessionToken();
+    const requestData = async (endpoint, body) => {
+      const response = await fetch(new URL(endpoint, SITE_POLICY.parseCanvas(location.href).apiOrigin), {
+        method: "POST", headers: authHeaders(), credentials: "include", body: JSON.stringify(body)
       });
-      if (!synced) throw new Error("Timed out waiting for Yjs sync");
-
+      if (!response.ok) throw new Error(`Canvas request failed (${response.status})`);
+      const payload = await response.json();
+      if (payload.code !== undefined && Number(payload.code) !== 0) throw new Error(`Canvas request rejected (${payload.code})`);
+      return payload.data ?? payload;
+    };
+    const detail = await requestData("/canvas/getCanvasDetail", { id: canvasId });
+    const userId = sessionUserId(token) || String(detail.user_id || detail.userId || "");
+    if (!userId) throw new Error("Current account identity unavailable");
+    const permissionBody = { canvasId, userId, includeYjsGeneration: true };
+    const teamId = authHeaders()["X-Team-Id"];
+    if (teamId) permissionBody.teamId = teamId;
+    const permission = await requestData("/canvas/checkUserIdByCanvasId", permissionBody);
+    const generation = permission.yjsGeneration;
+    if (generation != null && (!Number.isSafeInteger(generation) || generation <= 0)) throw new Error("Invalid canvas generation metadata");
+    if (permission.yjsGenerationRequired && generation == null) throw new Error("Missing required canvas generation");
+    if (write && (permission.canvasLocked || permission.yjsDivergenceRepair?.roomWriteBlocked)) throw new Error("Canvas is locked for writes");
+    const doc = new Y.Doc();
+    const provider = new WebsocketProvider(site.websocketUrl, canvasId, doc, {
+      connect: false, disableBc: true,
+      params: {
+        roomId: canvasId, userId, token, type: "canvas", version: "1.0.0",
+        readOnly: write ? "0" : "1", durableAck: "0", durableFlow: "0",
+        yjsClientId: String(doc.clientID), ...(generation == null ? {} : { generation: String(generation) })
+      }
+    });
+    // A read must never upload a state update, including the sync-step-2 reply.
+    if (!write) {
+      doc.off("update", provider._updateHandler);
+      const syncHandler = provider.messageHandlers[0];
+      provider.messageHandlers[0] = (encoder, decoder, ...args) => {
+        if (decoding.peekVarUint(decoder) === messageYjsSyncStep1) {
+          decoding.readVarUint(decoder);
+          decoding.readVarUint8Array(decoder);
+          return;
+        }
+        return syncHandler(encoder, decoder, ...args);
+      };
+    }
+    try {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Timed out waiting for canvas sync")), 12000);
+        provider.on("sync", (synced) => { if (synced) { clearTimeout(timer); resolve(); } });
+        provider.on("connection-close", (event) => {
+          if (event?.code >= 4000) { clearTimeout(timer); reject(new Error(`Canvas socket rejected (${event.code})`)); }
+        });
+        provider.connect();
+      });
       const root = doc.getMap("canvas");
-      let content = root.get("canvas_content");
-      if (!content) {
-        content = new Y.Map();
-        content.set("type", "canvas");
-        root.set("canvas_content", content);
+      const content = root.get("canvas_content");
+      const nodes = content?.get?.("nodes");
+      const edges = content?.get?.("edges");
+      if (!(nodes instanceof Y.Array) || !(edges instanceof Y.Array)) {
+        throw new Error("CANVAS_SCHEMA_UNSUPPORTED: missing synchronized nodes/edges; nothing was initialized");
       }
-      let nodes = content.get("nodes");
-      if (!nodes) {
-        nodes = new Y.Array();
-        content.set("nodes", nodes);
-      }
-      let edges = content.get("edges");
-      if (!edges) {
-        edges = new Y.Array();
-        content.set("edges", edges);
-      }
-
       const value = await fn({ Y, doc, root, content, nodes, edges, canvasId, detail });
-      await new Promise((resolve) => setTimeout(resolve, 1200));
+      if (write) await new Promise((resolve) => setTimeout(resolve, 1200));
       return value;
     } finally {
       provider.destroy();
@@ -446,14 +487,15 @@
         result: value,
         diff
       };
-    });
+    }, { write: !command.dryRun });
 
-  const replaceCanvasSnapshot = async ({ snapshot } = {}) => {
+  const replaceCanvasSnapshot = async ({ snapshot, expected } = {}) => {
     if (!snapshot || !Array.isArray(snapshot.nodes) || !Array.isArray(snapshot.edges)) {
       throw new Error("snapshot with nodes and edges is required");
     }
     return withCanvasYjs(({ Y, doc, nodes, edges, canvasId }) => {
       const before = { canvasId, nodes: yArrayToJson(nodes), edges: yArrayToJson(edges) };
+      if (!expected || JSON.stringify(before) !== JSON.stringify(expected)) throw new Error("ROLLBACK_CONFLICT: canvas changed after the operation");
       doc.transact(() => {
         if (edges.length) edges.delete(0, edges.length);
         if (nodes.length) nodes.delete(0, nodes.length);
@@ -462,17 +504,18 @@
       });
       const after = { canvasId, nodes: yArrayToJson(nodes), edges: yArrayToJson(edges) };
       return { applied: true, diff: diffCanvasSnapshots(before, after) };
-    });
+    }, { write: true });
   };
 
   const rollbackCanvas = async ({ rollbackId } = {}) => {
     const entry = rollbackId ? rollbackStack.find((item) => item.rollbackId === rollbackId) : rollbackStack[0];
     if (!entry) throw new Error(rollbackId ? `Rollback not found: ${rollbackId}` : "No rollback entry available");
-    const result = await replaceCanvasSnapshot({ snapshot: entry.before });
+    const result = await replaceCanvasSnapshot({ snapshot: entry.before, expected: entry.after });
     return { rollbackId: entry.rollbackId, commandId: entry.commandId, commandType: entry.commandType, ...result };
   };
 
   const COMMAND_CAPABILITIES = [
+    { type: "canvas.cloneTemplate", description: "Clone an empty configured model template without inputs or results." },
     {
       type: "graph.snapshot",
       description: "Read DOM-level Vue Flow nodes and edges from the visible page."
@@ -575,8 +618,9 @@
     },
     {
       type: "canvas.uploadLocalReferenceImage",
-      description: "Agent-friendly one-shot local image upload: create a staging image node, inject the file, and return directly usable reference nodes and URLs."
+      description: "Upload an image through native storage and create a reusable reference node."
     },
+    { type: "canvas.uploadLocalMedia", description: "Upload verified local image, video or audio from a scoped local file ticket, then create the native reference node." },
     {
       type: "canvas.runNode",
       description: "Call /canvas/task/run for one node using its upstream connected subgraph."
@@ -667,7 +711,7 @@
     }
   ];
 
-  const getNodeTitle = (node) => String(node?.data?.title || node?.data?.groupName || node?.label || "");
+  const getNodeTitle = (node) => String(node?.data?.label || node?.data?.title || node?.data?.groupName || node?.label || "");
   const getNodeText = (node) => String(node?.data?.text || node?.data?.params?.prompt || node?.text || "");
   const normalizeQuery = (value) => String(value || "").trim().toLowerCase();
 
@@ -911,7 +955,9 @@
     bridgeVersion: 1,
     clientId: CLIENT_ID,
     href: location.href,
-    commands: COMMAND_CAPABILITIES
+    commands: COMMAND_CAPABILITIES.filter((item) => SITE_POLICY.commandMode(item) !== "blocked"),
+    access: ACCESS,
+    site: SITE_POLICY.parseCanvas(location.href)
   });
 
   const summarizeCanvas = async ({ includeUrls = false, includeTextPreview = true, compact = true, full = false, limit, types, status, fields, textPreviewLength = 120 } = {}) =>
@@ -1078,7 +1124,8 @@
     });
   };
 
-  const getElement = async ({ id } = {}) => {
+  const getElement = async ({ elementId, id = elementId } = {}) => {
+    id = elementId || id;
     if (!id) throw new Error("id is required");
     return withCanvasYjs(({ nodes, edges, canvasId }) => {
       const node = yArrayToJson(nodes).find((item) => item?.id === id);
@@ -1363,7 +1410,10 @@
     if (target.type !== "rh-video") errors.push(`Expected rh-video node, got ${target.type || "unknown"}`);
 
     const params = target.data?.params || {};
-    const imageUrls = Array.isArray(params.imageUrls) ? params.imageUrls.filter(Boolean) : [];
+    const nativeH3 = String(target.data?.modelCode || "").includes("minimax-h3");
+    const imageUrls = nativeH3
+      ? Object.keys(params).filter(key => /^refImage\d+$/.test(key)).sort((a,b) => Number(a.slice(8))-Number(b.slice(8))).map(key => params[key]).filter(Boolean)
+      : Array.isArray(params.imageUrls) ? params.imageUrls.filter(Boolean) : [];
     const upstream = directUpstreamNodes({ targetId, nodes, edges });
     const upstreamImages = upstream
       .filter(({ node }) => node?.type === "rh-image")
@@ -1378,10 +1428,10 @@
       if (!String(target.data?.modelCode || "").includes("multimodal-video")) {
         errors.push(`Expected multimodal video modelCode, got ${target.data?.modelCode || "empty"}`);
       }
-      if (!imageUrls.length) errors.push("params.imageUrls is empty");
+      if (!nativeH3 && !imageUrls.length) errors.push("params.imageUrls is empty");
       if (!upstreamImages.length) errors.push("No direct upstream rh-image edges");
       if (missingUpstreamUrls.length) errors.push(`imageUrls without matching direct upstream image output: ${missingUpstreamUrls.join(", ")}`);
-      if (!Array.isArray(params.conversionSlots) || !params.conversionSlots.length) errors.push("params.conversionSlots is empty");
+      if (!nativeH3 && (!Array.isArray(params.conversionSlots) || !params.conversionSlots.length)) errors.push("params.conversionSlots is empty");
     }
 
     return {
@@ -1458,17 +1508,7 @@
     );
   };
 
-  const uniquePromptParts = (parts) => {
-    const seen = new Set();
-    return parts
-      .map((part) => String(part || "").trim())
-      .filter(Boolean)
-      .filter((part) => {
-        if (seen.has(part)) return false;
-        seen.add(part);
-        return true;
-      });
-  };
+  const uniquePromptParts = SITE_POLICY.mergePromptParts;
 
   const prepareVideoNode = async ({ nodeId, id, targetId, prompt, appendPrompt = "", promptMergeMode = "merge", referenceNodeIds, maxDepth = 1, modelCode, dryRun, ...command } = {}) => {
     const target = targetId || nodeId || id;
@@ -1503,7 +1543,8 @@
       const imageUrls = [...new Set(referenceEntries.map((item) => item.url))];
       if (!imageUrls.length) throw new Error("No upstream image outputs found for video references");
       const existingModelCode = videoNode.data?.modelCode || "";
-      const nextModelCode = modelCode || (String(existingModelCode).includes("multimodal-video") ? existingModelCode : MODEL_OPTIONS["multimodal-video"].defaultModelCode);
+      const nextModelCode = modelCode || existingModelCode;
+      if (!nextModelCode) throw new Error("Choose a model explicitly before preparing video references");
 
       const next = {
         ...videoNode,
@@ -1593,7 +1634,7 @@
     return { prepared, validation, run };
   };
 
-  const runNode = async ({ nodeId, id, targetId, maxDepth = 8, maxChars = 120000, validateReferences = false } = {}) => {
+  const runNode = async ({ nodeId, id, targetId, maxDepth = 8, maxChars = 120000, validateReferences = false, dryRun = false } = {}) => {
     const target = targetId || nodeId || id;
     if (!target) throw new Error("nodeId is required");
     const payload = await withCanvasYjs(({ nodes, edges, canvasId }) => {
@@ -1601,11 +1642,9 @@
       const currentEdges = yArrayToJson(edges);
       const targetNode = currentNodes.find((node) => node?.id === target);
       if (!targetNode) throw new Error(`Node not found: ${target}`);
-      if (validateReferences) {
-        const validation = validateNodeRunSnapshot({ targetId: target, nodes: currentNodes, edges: currentEdges, requireReferences: true });
-        if (!validation.ok) throw new Error(`Node run validation failed: ${validation.errors.join("; ")}`);
-      }
-      const subgraph = collectUpstreamSubgraph({ targetId: target, nodes: currentNodes, edges: currentEdges, maxDepth: Number(maxDepth) || 8 });
+      const validation = validateNodeRunSnapshot({ targetId: target, nodes: currentNodes, edges: currentEdges, requireReferences: validateReferences });
+      if (!validation.ok) throw new Error(`Node run validation failed: ${validation.errors.join("; ")}`);
+      const subgraph = collectUpstreamSubgraph({ targetId: target, nodes: currentNodes, edges: currentEdges, maxDepth: Number(maxDepth) });
       return {
         canvasId,
         targetType: "NODE",
@@ -1613,8 +1652,11 @@
         canvas: subgraph
       };
     });
+    if (dryRun) return { dryRun: true, submitted: false, request: payload };
     const response = await postJson("/canvas/task/run", payload, maxChars);
-    return { request: payload, response, task: taskInfoFromRunResponse(response) };
+    const task = taskInfoFromRunResponse(response);
+    if (!task.ok) throw new Error(`RUN_REJECTED: ${task.code ?? response.status}: ${String(task.msg || "Request rejected").slice(0, 300)}`);
+    return { submitted: Boolean(task.taskId), submissionState: task.taskId ? "submitted" : "unknown", task };
   };
 
   const mergePlainObject = (target, patch) => {
@@ -1747,8 +1789,8 @@
         id: nodeId,
         type: "rh-text",
         position: {
-          x: Number(config.x) || Math.max(300, maxX + 360),
-          y: Number(config.y) || 300
+          x: Number(config.x ?? Math.max(300, maxX + 360)),
+          y: Number(config.y ?? 300)
         },
         zIndex: currentNodes.length + 1,
         style: {},
@@ -1760,6 +1802,7 @@
           subType: "text-text",
           textModelListType: "text-text",
           title: config.title || "API 文本节点",
+          label: config.label || config.title || "API 文本节点",
           agentCreated: true,
           from: "bridge",
           agentNodeType: config.agentNodeType || "copywriting",
@@ -1803,6 +1846,7 @@
             subType: "text-text",
             textModelListType: "text-text",
             title: config.title || `Agent 文本节点 ${index + 1}`,
+            label: config.label || config.title || `Agent 文本节点 ${index + 1}`,
             agentCreated: true,
             from: "bridge",
             agentNodeType: config.agentNodeType || "copywriting",
@@ -1898,6 +1942,7 @@
       const suffix = Math.random().toString(36).slice(2, 10);
       const template = config.node && typeof config.node === "object" ? config.node : {};
       const nodeId = config.id || template.id || `node-${timestamp}-${suffix}`;
+      if (currentNodes.some(node => node.id === nodeId)) throw new Error(`DUPLICATE_NODE_ID: ${nodeId}`);
       const maxX = currentNodes.reduce((max, node) => Math.max(max, Number(node?.position?.x) || 0), 0);
       const node = {
         ...template,
@@ -1918,6 +1963,29 @@
       if (config.position) node.position = { ...node.position, ...config.position };
       doc.transact(() => nodes.push([toYValue(Y, node)]));
       return { nodeId, node };
+    });
+
+  const cloneTemplate = async ({ sourceNodeId, nodeId, title, x, y, ...command }) =>
+    withCanvasMutation({ type: "canvas.cloneTemplate", ...command }, ({ Y, doc, nodes, edges }) => {
+      const current = yArrayToJson(nodes);
+      const source = current.find(node => node.id === sourceNodeId);
+      if (!source) throw new Error(`Node not found: ${sourceNodeId}`);
+      if ((source.data?.output || []).length || getNodeText(source).trim() ||
+          (source.data?.sourceObjects || []).length || (source.data?.params?.imageUrls || []).length ||
+          Object.entries(source.data?.params || {}).some(([key, value]) => /^ref(Image|Video|Audio)\d+$/.test(key) && value) ||
+          yArrayToJson(edges).some(edge => edge.target === sourceNodeId) ||
+          /running|queued|processing/i.test(source.data?.status || "")) {
+        throw new Error("TEMPLATE_NOT_EMPTY: select a blank configured template, not a result node");
+      }
+      const id = nodeId || `node_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      if (current.some(node => node.id === id)) throw new Error(`DUPLICATE_NODE_ID: ${id}`);
+      const node = JSON.parse(JSON.stringify(source));
+      Object.assign(node, { id, position: { x: Number(x), y: Number(y) }, selected: false, zIndex: current.length + 1 });
+      for (const key of ["parentNode", "parentId", "extent", "positionAbsolute", "dragging", "measured"]) delete node[key];
+      for (const key of ["output", "taskId", "jobId", "progress", "error", "errorMsg", "queuePosition"]) delete node.data[key];
+      Object.assign(node.data, { title, label: title, status: "idle" });
+      doc.transact(() => nodes.push([toYValue(Y, node)]));
+      return { nodeId: id, sourceNodeId, modelCode: node.data.modelCode, params: node.data.params, generationTriggered: false };
     });
 
   const createVideoNode = async (config = {}, command = {}) =>
@@ -2344,108 +2412,77 @@
 
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  const uploadReferenceImage = async ({ nodeId, targetNodeId, file = {}, inputIndex = 1, waitMs = 8000 } = {}) => {
-    const target = targetNodeId || nodeId;
-    if (!target) throw new Error("nodeId is required");
-    if (!file.base64) throw new Error("file.base64 is required");
-    const nodeEl = Array.from(document.querySelectorAll(".vue-flow__node")).find((el) => el.getAttribute("data-id") === target);
-    if (!nodeEl) throw new Error(`Rendered node not found: ${target}`);
-    nodeEl.click();
-    await wait(500);
-
-    const bytes = Uint8Array.from(atob(file.base64), (char) => char.charCodeAt(0));
-    const uploadFile = new File([bytes], file.name || "reference.jpg", {
-      type: file.type || "image/jpeg",
-      lastModified: Date.now()
+  let uploadModulePromise;
+  const uploadCanvasFile = async (file) => {
+    if (!file.base64 && !/^[0-9a-f-]{36}$/.test(file.ticket || '')) throw new Error("file ticket or base64 is required");
+    const local = file.ticket ? await fetch(`${BRIDGE}/media/${file.ticket}`) : null;
+    if (local && !local.ok) throw new Error("LOCAL_MEDIA_UNAVAILABLE");
+    const bytes = local ? new Uint8Array(await local.arrayBuffer()) : Uint8Array.from(atob(file.base64), char => char.charCodeAt(0));
+    const limit = file.type?.startsWith('video/') ? 500 : file.type?.startsWith('audio/') ? 50 : 30;
+    if (bytes.length > limit * 1024 * 1024) throw new Error(`Media exceeds ${limit} MiB`);
+    const uploadFile = new File([bytes], file.name || "reference.png", { type: file.type || "image/png" });
+    const cookieIdentify = document.cookie.split(";").map(part => part.trim()).find(part => part.startsWith("Rh-Identify="))?.slice("Rh-Identify=".length);
+    let tokenIdentity = "";
+    try { tokenIdentity = JSON.parse(atob(sessionToken().split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).username || ""; } catch {}
+    const identify = cookieIdentify ? decodeURIComponent(cookieIdentify) : tokenIdentity || localStorage.getItem("Rh-Identify");
+    if (!identify) throw new Error("UPLOAD_IDENTITY_MISSING");
+    const response = await fetch(new URL("/api/storage/getCredentials", SITE_POLICY.parseCanvas(location.href).apiOrigin), {
+      method: "POST", headers: authHeaders(), credentials: "include", body: JSON.stringify({ scene: "canvas" })
     });
-    const inputs = Array.from(document.querySelectorAll('.vue-flow__node-rh-image.selected input[type="file"][accept="image/*"]'));
-    const orderedIndexes = [Number(inputIndex), 0, 1, 2].filter((value, index, array) => Number.isInteger(value) && value >= 0 && array.indexOf(value) === index);
-    const attempts = [];
-    for (const index of orderedIndexes) {
-      const input = inputs[index];
-      if (!input) continue;
-      try {
-        const transfer = new DataTransfer();
-        transfer.items.add(uploadFile);
-        Object.defineProperty(input, "files", { configurable: true, value: transfer.files });
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-        attempts.push({ index, ok: true, multiple: input.multiple, files: input.files?.length || 0 });
-        break;
-      } catch (error) {
-        attempts.push({ index, ok: false, error: String(error) });
-      }
-    }
-    if (!attempts.some((attempt) => attempt.ok)) {
-      throw new Error(`No image input accepted file: ${JSON.stringify(attempts)}`);
-    }
-    await wait(Number(waitMs) || 8000);
-    const connections = await getConnections({ nodeId: target, direction: "upstream", depth: 1 });
-    return { targetNodeId: target, file: { name: uploadFile.name, type: uploadFile.type, size: uploadFile.size }, attempts, connections };
+    const payload = await response.json();
+    if (!response.ok || (payload.code !== undefined && Number(payload.code) !== 0)) throw new Error("UPLOAD_CREDENTIALS_UNAVAILABLE");
+    const credential = payload.data?.data || payload.data || payload;
+    if (!credential.accessKey || !credential.secretKey || !credential.bucket || !credential.region) throw new Error("UPLOAD_CREDENTIALS_UNAVAILABLE");
+    const { S3, Upload } = await (uploadModulePromise ||= import(`${BRIDGE}/vendor/upload.js`));
+    const endpoint = credential.endpoint && credential.region ? credential.endpoint.replace(credential.region, "accelerate") : credential.endpoint;
+    const client = new S3({ endpoint, region: credential.region, forcePathStyle: credential.type === "minio",
+      credentials: { accessKeyId: credential.accessKey, secretAccessKey: credential.secretKey, sessionToken: credential.sessionToken } });
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), n => n.toString(16).padStart(2, "0")).join("");
+    if (file.sha256 && digest !== file.sha256) throw new Error("SOURCE_SHA_MISMATCH");
+    const suffix = ({'image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp','video/mp4':'.mp4','video/quicktime':'.mov','video/webm':'.webm','audio/wav':'.wav','audio/mpeg':'.mp3','audio/mp4':'.m4a','audio/aac':'.aac','audio/flac':'.flac','audio/ogg':'.ogg'})[file.type];
+    if (!suffix) throw new Error('UNSUPPORTED_MEDIA');
+    const key = `${identify}/uploads/rh-bridge-${digest}${suffix}`;
+    try {
+      const uploader = new Upload({ client, params: { Bucket: credential.bucket, Body: uploadFile, Key: key, ACL: "public-read",
+        ContentType: uploadFile.type, Metadata: { contentType: uploadFile.type, contentLength: String(uploadFile.size) } } });
+      const uploaded = await uploader.done();
+      let url = String(uploaded.Location || "");
+      if (!url) throw new Error("UPLOAD_EMPTY_URL");
+      if (credential.cdnDomain) url = `https://${credential.cdnDomain}/${new URL(url).pathname.replace(/^\//, "")}`;
+      else if (credential.region) url = url.replace("accelerate", credential.region);
+      let dimensions = { width: 380, height: 320 };
+      if (file.type.startsWith('image/')) try { const bitmap = await createImageBitmap(uploadFile); dimensions = { width: bitmap.width, height: bitmap.height }; bitmap.close(); } catch {}
+      return { url, file: { name: uploadFile.name, type: uploadFile.type, size: uploadFile.size, sha256: digest }, dimensions };
+    } finally { client.destroy(); }
   };
 
-  const usableReferencesFromConnections = (connections = {}) => {
-    const targetIds = new Set(connections.seeds || []);
-    return (connections.nodes || [])
-      .filter((node) => node?.type === "rh-image" && !targetIds.has(node.id))
-      .map((node) => ({
-        nodeId: node.id,
-        title: node.data?.title,
-        label: node.data?.label,
-        urls: imageUrlsFromNode(node)
-      }))
-      .filter((item) => item.urls.length);
+  const uploadLocalReferenceImage = async ({ config = {}, file = {}, connectToNodeId } = {}) => {
+    if (connectToNodeId) await getElement({ elementId: connectToNodeId });
+    const uploaded = await uploadCanvasFile(file);
+    const created = await createNode({ id: config.id, type: "rh-image", x: config.x, y: config.y,
+      data: { title: config.title || file.name, label: config.title || file.name, status: "idle",
+        sourceObjects: [uploaded.url], imageUrl: uploaded.url, ...uploaded.dimensions } }, { type: "canvas.createNode" });
+    const nodeId = created.result.nodeId;
+    const connectedEdges = connectToNodeId ? [(await connectNodes({ source: nodeId, target: connectToNodeId })).result] : [];
+    const reference = { nodeId, title: config.title || file.name, urls: [uploaded.url] };
+    return { ok: true, file: uploaded.file, primaryReference: reference, usableReferences: [reference], connectedEdges, generationTriggered: false };
   };
 
-  const uploadLocalReferenceImage = async ({ config = {}, file = {}, inputIndex = 1, waitMs = 8000, renderWaitMs = 1200, connectToNodeId } = {}) => {
-    if (!file.base64) throw new Error("file.base64 is required");
-    const stagingConfig = {
-      title: file.name ? `参考图｜${file.name}` : "参考图",
-      data: {
-        label: file.name || "reference image",
-        width: Number(config.width || 380),
-        height: Number(config.height || 320)
-      },
-      ...config
-    };
-    const created = await createImageNode(stagingConfig, { type: "canvas.createImageNode" });
-    const stagingNodeId = created?.result?.nodeId;
-    if (!stagingNodeId) throw new Error("Failed to create staging image node");
-    await wait(Number(renderWaitMs) || 1200);
-    const uploaded = await uploadReferenceImage({ nodeId: stagingNodeId, file, inputIndex, waitMs });
-    const usableReferences = usableReferencesFromConnections(uploaded.connections);
-    const connectedEdges = [];
-    if (connectToNodeId) {
-      for (const reference of usableReferences) {
-        const edgeResult = await connectNodes({ source: reference.nodeId, target: connectToNodeId });
-        connectedEdges.push(edgeResult?.result || edgeResult);
-      }
-    }
-    const ok = usableReferences.length > 0;
-    return {
-      ok,
-      errorCode: ok ? null : "NO_USABLE_REFERENCE",
-      stagingNodeId,
-      file: uploaded.file,
-      attempts: uploaded.attempts,
-      usableReferences,
-      primaryReference: usableReferences[0] || null,
-      connectedEdges,
-      connections: uploaded.connections,
-      warnings: ok
-        ? []
-        : [
-            "File injection succeeded, but no usable uploaded reference URL was found.",
-            "Increase --wait-ms, verify the rendered upload node completed upload, or use create-reference-from-url with an existing image URL."
-          ],
-      nextActions: ok
-        ? []
-        : [
-            "Retry with a longer --wait-ms.",
-            "Check the RunningHub page for an upload error on the staging image node.",
-            "Use create-reference-from-url if the image is already hosted."
-          ]
-    };
+  const uploadReferenceImage = async ({ nodeId, targetNodeId, file, config = {} }) =>
+    uploadLocalReferenceImage({ file, config, connectToNodeId: targetNodeId || nodeId });
+
+  const uploadLocalMedia = async ({ config = {}, file = {}, connectToNodeId } = {}) => {
+    if (file.kind === 'image') return uploadLocalReferenceImage({ config, file, connectToNodeId });
+    if (!['video','audio'].includes(file.kind) || !file.type?.startsWith(file.kind+'/')) throw new Error('UNSUPPORTED_MEDIA');
+    if (connectToNodeId) await getElement({ elementId: connectToNodeId });
+    const uploaded=await uploadCanvasFile(file);
+    const data={title:config.title || file.name,label:config.title || file.name,status:'idle',sourceObjects:[uploaded.url],
+      fileName:file.name,fileSize:uploaded.file.size,mimeType:file.type,duration:file.duration,subType:`text-${file.kind}`,
+      ...(file.kind==='video' ? {videoUrl:uploaded.url,sourceVideo:uploaded.url,videoWidth:file.width,videoHeight:file.height,width:380,height:280} : {audioUrl:uploaded.url,width:380,height:160})};
+    const created=await createNode({id:config.id,type:`rh-${file.kind}`,x:config.x,y:config.y,data},{type:'canvas.createNode'});
+    const nodeId=created.result.nodeId;
+    const connectedEdges=connectToNodeId ? [(await connectNodes({source:nodeId,target:connectToNodeId})).result] : [];
+    return {ok:true,file:uploaded.file,mediaKind:file.kind,primaryReference:{nodeId,urls:[uploaded.url]},connectedEdges,generationTriggered:false};
   };
 
   const pollNodeResult = async ({ nodeId, id, timeoutMs = 180000, intervalMs = 3000, requireOutput = true } = {}) => {
@@ -2643,11 +2680,11 @@
               node.set("data", data);
             }
             if (text !== undefined) data.set("text", text);
-            if (title !== undefined) data.set("title", title);
+            if (title !== undefined) { data.set("title", title); data.set("label", title); }
           } else {
             nodeJson.data ||= {};
             if (text !== undefined) nodeJson.data.text = text;
-            if (title !== undefined) nodeJson.data.title = title;
+            if (title !== undefined) { nodeJson.data.title = title; nodeJson.data.label = title; }
             nodes.delete(index, 1);
             nodes.insert(index, [toYValue(Y, nodeJson)]);
           }
@@ -2683,7 +2720,7 @@
           if (style) next.style = mergePlainObject(next.style, style);
           if (title !== undefined || text !== undefined) {
             next.data ||= {};
-            if (title !== undefined) next.data.title = title;
+            if (title !== undefined) { next.data.title = title; next.data.label = title; }
             if (text !== undefined) next.data.text = text;
           }
           if (zIndex !== undefined) next.zIndex = Number(zIndex);
@@ -2763,6 +2800,9 @@
     if (!command || !command.id) return;
     let result;
     try {
+      if (command.expiresAt && command.expiresAt < Date.now()) throw new Error("COMMAND_EXPIRED");
+      const denied = SITE_POLICY.authorizeCommand(command, ACCESS, SITE_POLICY.parseCanvas(location.href));
+      if (denied) throw new Error(denied);
       if (command.type === "graph.snapshot") {
         result = summarizeGraph();
       } else if (command.type === "canvas.exportWorkflow") {
@@ -2816,6 +2856,8 @@
         result = await groupElements(command);
       } else if (command.type === "canvas.createNode") {
         result = await createNode(command.config || {}, command);
+      } else if (command.type === "canvas.cloneTemplate") {
+        result = await cloneTemplate(command);
       } else if (command.type === "canvas.createVideoNode") {
         result = await createVideoNode(command.config || {}, command);
       } else if (command.type === "canvas.createImageNode") {
@@ -2830,6 +2872,8 @@
         result = await uploadReferenceImage(command);
       } else if (command.type === "canvas.uploadLocalReferenceImage") {
         result = await uploadLocalReferenceImage(command);
+      } else if (command.type === "canvas.uploadLocalMedia") {
+        result = await uploadLocalMedia(command);
       } else if (command.type === "canvas.prepareVideoNode") {
         result = await prepareVideoNode(command);
       } else if (command.type === "canvas.validateVideoRun") {
@@ -2861,9 +2905,9 @@
       } else if (command.type === "canvas.deleteElements") {
         result = await deleteElements(command);
       } else if (command.type === "canvas.getDetail") {
-        result = await postJson("/canvas/getCanvasDetail", command.body || { id: command.canvasId }, command.maxChars);
+        result = await postJson("/canvas/getCanvasDetail", { id: SITE_POLICY.parseCanvas(location.href).canvasId }, command.maxChars);
       } else if (command.type === "canvas.workflowList") {
-        result = await postJson("/canvas/workflow/list", command.body || { canvasId: command.canvasId }, command.maxChars);
+        result = await postJson("/canvas/workflow/list", { canvasId: SITE_POLICY.parseCanvas(location.href).canvasId }, command.maxChars);
       } else if (command.type === "api.post") {
         result = await postJson(command.endpoint, command.body || {}, command.maxChars);
       } else if (command.type === "page.eval") {
@@ -2904,124 +2948,20 @@
       if (response.ok) {
         const commands = await response.json();
         for (const command of commands) await executeCommand(command);
+      } else if (response.status === 403) {
+        // The local service may have restarted while this page stayed open.
+        await postEvent({ kind: "bridge.installed", graph: summarizeGraph() });
       }
     } catch {}
     pollTimer = setTimeout(pollCommands, 700);
   };
-
-  originalFetch = window.fetch.bind(window);
-  window.fetch = async function patchedFetch(input, init) {
-    const url = typeof input === "string" ? input : input && input.url;
-    const capture = shouldCapture(url);
-    const requestRecord = capture
-      ? {
-          kind: "fetch.request",
-          requestId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          url: redactUrl(url),
-          method: (init && init.method) || (input && input.method) || "GET",
-          headers: redactHeaders((init && init.headers) || (input && input.headers)),
-          body: init && typeof init.body === "string" ? init.body.slice(0, 60000) : undefined
-        }
-      : null;
-    if (requestRecord) postEvent(requestRecord);
-    const response = await originalFetch(input, init);
-    if (requestRecord) {
-      try {
-        response
-          .clone()
-          .text()
-          .then((text) => {
-            postEvent({
-              kind: "fetch.response",
-              requestId: requestRecord.requestId,
-              url: redactUrl(url),
-              status: response.status,
-              ok: response.ok,
-              text: text.slice(0, 240000)
-            });
-          })
-          .catch((error) => {
-            postEvent({
-              kind: "fetch.response.error",
-              requestId: requestRecord.requestId,
-              url: redactUrl(url),
-              error: String(error)
-            });
-          });
-      } catch (error) {
-        postEvent({
-          kind: "fetch.response.error",
-          requestId: requestRecord.requestId,
-          url: redactUrl(url),
-          error: String(error)
-        });
-      }
-    }
-    return response;
-  };
-
-  OriginalXHR = window.XMLHttpRequest;
-  window.XMLHttpRequest = function PatchedXMLHttpRequest() {
-    const xhr = new OriginalXHR();
-    const rec = { kind: "xhr.request", headers: {}, requestId: `${Date.now()}-${Math.random().toString(36).slice(2)}` };
-    const open = xhr.open;
-    xhr.open = function openPatched(method, url) {
-      rec.method = method;
-      rec.url = String(url);
-      rec.safeUrl = redactUrl(url);
-      rec.capture = shouldCapture(url);
-      return open.apply(xhr, arguments);
-    };
-    const setRequestHeader = xhr.setRequestHeader;
-    xhr.setRequestHeader = function setRequestHeaderPatched(key, value) {
-      rec.headers[key] = /authorization|token|cookie/i.test(key) ? "[REDACTED]" : value;
-      return setRequestHeader.apply(xhr, arguments);
-    };
-    const send = xhr.send;
-    xhr.send = function sendPatched(body) {
-      if (rec.capture) {
-        if (typeof body === "string") rec.body = body.slice(0, 60000);
-        postEvent(rec);
-        xhr.addEventListener("loadend", () => {
-          postEvent({
-            kind: "xhr.response",
-            requestId: rec.requestId,
-            url: rec.safeUrl,
-            status: xhr.status,
-            text: String(xhr.responseText || "").slice(0, 240000)
-          });
-        });
-      }
-      return send.apply(xhr, arguments);
-    };
-    return xhr;
-  };
-
-  OriginalWebSocket = window.WebSocket;
-  window.WebSocket = function PatchedWebSocket(url, protocols) {
-    const safeUrl = redactUrl(url);
-    postEvent({
-      kind: "websocket.open",
-      url: safeUrl,
-      protocols: safeJson(protocols)
-    });
-    const ws = protocols === undefined ? new OriginalWebSocket(url) : new OriginalWebSocket(url, protocols);
-    ws.addEventListener("open", () => postEvent({ kind: "websocket.status", url: safeUrl, status: "open" }));
-    ws.addEventListener("close", (event) =>
-      postEvent({ kind: "websocket.status", url: safeUrl, status: "close", code: event.code, reason: event.reason })
-    );
-    ws.addEventListener("error", () => postEvent({ kind: "websocket.status", url: safeUrl, status: "error" }));
-    return ws;
-  };
-  window.WebSocket.prototype = OriginalWebSocket.prototype;
-  Object.assign(window.WebSocket, OriginalWebSocket);
 
   window.__RUNNINGHUB_CANVAS_BRIDGE__ = {
     clientId: CLIENT_ID,
     version: RUNTIME_VERSION,
     graph: summarizeGraph,
     capabilities: canvasCapabilities,
-    commands: COMMAND_CAPABILITIES.map((capability) => capability.type)
+    commands: COMMAND_CAPABILITIES.filter((item) => SITE_POLICY.commandMode(item) !== "blocked").map((capability) => capability.type)
   };
 
   window.__RUNNINGHUB_CANVAS_BRIDGE_CLEANUP__ = () => {

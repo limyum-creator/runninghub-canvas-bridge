@@ -2,7 +2,7 @@
 
 Thanks for your interest in RunningHub Canvas Bridge.
 
-This project is currently in a research/prototype stage. For now, please open Issues for bugs, feature ideas, API observations, and design feedback. Pull Requests are not being reviewed or accepted yet.
+Issues and Pull Requests are welcome for bugs, feature ideas, compatibility fixes and documentation. Keep changes focused, describe the observed behavior, and include relevant validation.
 
 ## Good Issues
 
@@ -49,5 +49,5 @@ Good redaction examples:
 ## Current Maintainer Policy
 
 - Issues are welcome.
-- Pull Requests are not accepted at this stage.
+- Pull Requests should pass `npm run check`, `npm test` (requires ffprobe) and `npm run build`.
 - Security-sensitive findings should be reported without public secrets or exploitable private payloads.

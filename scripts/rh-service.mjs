@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Modified 2026-09-27: persistent canvas scope and configurable generation access.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -14,6 +15,8 @@ const outLog = resolve(logDir, "bridge.out.log");
 const errLog = resolve(logDir, "bridge.err.log");
 const serverPath = resolve(repoRoot, "server/server.mjs");
 const nodePath = process.execPath;
+const accessPath = resolve(homedir(), ".runninghub-canvas-bridge/access.json");
+const xml = value => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 const guiTarget = `gui/${userInfo().uid}`;
 
 const print = (value) => console.log(JSON.stringify(value, null, 2));
@@ -49,11 +52,11 @@ const plist = () => `<?xml version="1.0" encoding="UTF-8"?>
   <string>${label}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${nodePath}</string>
-    <string>${serverPath}</string>
+    <string>${xml(nodePath)}</string>
+    <string>${xml(serverPath)}</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${repoRoot}</string>
+  <string>${xml(repoRoot)}</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -66,6 +69,10 @@ const plist = () => `<?xml version="1.0" encoding="UTF-8"?>
   <dict>
     <key>NODE_ENV</key>
     <string>production</string>
+    <key>RH_BRIDGE_ACCESS_FILE</key>
+    <string>${xml(accessPath)}</string>
+    <key>RH_BRIDGE_ALLOW_GENERATION</key>
+    <string>${process.env.RH_BRIDGE_ALLOW_GENERATION === "1" ? "1" : "0"}</string>
   </dict>
 </dict>
 </plist>
@@ -88,31 +95,42 @@ const serviceStatus = () => {
   };
 };
 
-const install = () => {
+const readyStatus = async () => {
+  let status;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    status = serviceStatus();
+    if (status.ok) return status;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  return status;
+};
+
+const install = async () => {
   ensureMac();
   mkdirSync(dirname(plistPath), { recursive: true });
   mkdirSync(logDir, { recursive: true });
+  if (run("launchctl", ["list", label]).ok) run("launchctl", ["bootout", `${guiTarget}/${label}`]);
   writeFileSync(plistPath, plist(), "utf8");
   const bootstrap = run("launchctl", ["bootstrap", guiTarget, plistPath]);
   if (!bootstrap.ok && !/already bootstrapped|service already loaded/i.test(bootstrap.stderr)) {
     fail("Failed to bootstrap LaunchAgent.", { plistPath, launchctl: bootstrap.stderr });
   }
   run("launchctl", ["kickstart", "-k", `${guiTarget}/${label}`]);
-  print({ ok: true, action: "install", ...serviceStatus() });
+  print({ action: "install", ...await readyStatus() });
 };
 
-const start = () => {
+const start = async () => {
   ensureMac();
   mkdirSync(dirname(plistPath), { recursive: true });
   mkdirSync(logDir, { recursive: true });
   if (!existsSync(plistPath)) writeFileSync(plistPath, plist(), "utf8");
-  const bootstrap = run("launchctl", ["bootstrap", guiTarget, plistPath]);
+  const bootstrap = run("launchctl", ["list", label]).ok ? { ok: true } : run("launchctl", ["bootstrap", guiTarget, plistPath]);
   if (!bootstrap.ok && !/already bootstrapped|service already loaded/i.test(bootstrap.stderr)) {
     fail("Failed to bootstrap LaunchAgent.", { plistPath, launchctl: bootstrap.stderr });
   }
   const kickstart = run("launchctl", ["kickstart", "-k", `${guiTarget}/${label}`]);
   if (!kickstart.ok) fail("Failed to start LaunchAgent.", { launchctl: kickstart.stderr });
-  print({ ok: true, action: "start", ...serviceStatus() });
+  print({ action: "start", ...await readyStatus() });
 };
 
 const stop = () => {
@@ -127,12 +145,12 @@ const uninstall = () => {
   print({ ok: true, action: "uninstall", installed: false, label, plistPath });
 };
 
-if (action === "install") install();
-else if (action === "start") start();
+if (action === "install") await install();
+else if (action === "start") await start();
 else if (action === "status") print(serviceStatus());
 else if (action === "restart") {
   stop();
-  start();
+  await start();
 } else if (action === "uninstall") uninstall();
 else if (action === "plist") {
   print({ ok: true, plistPath, plist: existsSync(plistPath) ? readFileSync(plistPath, "utf8") : plist() });

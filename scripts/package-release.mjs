@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Modified 2026-09-27: include site policy and attribution in extension packages.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -39,7 +40,7 @@ mkdirSync(distDir, { recursive: true });
 if (existsSync(zipPath)) rmSync(zipPath);
 if (existsSync(checksumPath)) rmSync(checksumPath);
 
-const zip = spawnSync("zip", ["-qr", zipPath, "manifest.json", "bridge-main.js"], {
+const zip = spawnSync("zip", ["-qr", zipPath, "manifest.json", "site-policy.js", "bridge-main.js", "LICENSE", "UPSTREAM.md"], {
   cwd: extensionDir,
   encoding: "utf8"
 });

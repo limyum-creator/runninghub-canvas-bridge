@@ -1,20 +1,31 @@
 {
   "manifest_version": 3,
   "name": "RunningHub Canvas Bridge",
-  "version": "0.1.0",
-  "description": "Local bridge for inspecting and controlling RunningHub canvas pages.",
-  "runninghub_canvas_bridge_protocol": "1",
+  "version": "0.4.0",
+  "description": "Read and edit RunningHub infinite canvases through a local bridge.",
   "permissions": [],
   "host_permissions": [
-    "https://rhtv.runninghub.cn/*",
-    "http://127.0.0.1:8765/*"
+    "https://www.runninghub.ai/project/canvas/*",
+    "https://rhtv.runninghub.ai/project/canvas/*",
+    "https://www.runninghub.cn/project/canvas/*",
+    "https://rhtv.runninghub.cn/projects/canvas/*",
+    "http://127.0.0.1:18765/*"
   ],
   "content_scripts": [
     {
-      "matches": ["https://rhtv.runninghub.cn/*"],
-      "js": ["bridge-main.js"],
+      "matches": [
+        "https://www.runninghub.ai/project/canvas/*",
+        "https://rhtv.runninghub.ai/project/canvas/*",
+        "https://www.runninghub.cn/project/canvas/*",
+        "https://rhtv.runninghub.cn/projects/canvas/*"
+      ],
+      "js": [
+        "site-policy.js",
+        "bridge-main.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     }
-  ]
+  ],
+  "version_name": "0.4.0-dev (MCP, modified 2026-09-27)"
 }

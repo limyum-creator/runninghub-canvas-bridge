@@ -1,27 +1,61 @@
+// Modified 2026-09-27: international routing, origin restrictions and canvas-scoped writes.
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile, rename, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+import { MediaTickets } from "./media.mjs";
+import { ArchiveManager } from "./archive.mjs";
+const mediaTickets = new MediaTickets();
+const archives = new ArchiveManager();
+await archives.init();
+archives.start();
 
-const PORT = 8765;
+import "../extension/site-policy.js";
+const SITE_POLICY = globalThis.RHCanvasSitePolicy;
+const PORT = Number(process.env.RH_BRIDGE_PORT || 18765);
+if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) throw new Error("Invalid local bridge port");
+const ACCESS_FILE = process.env.RH_BRIDGE_ACCESS_FILE;
+let ACCESS = {
+  allowWrites: process.env.RH_BRIDGE_ALLOW_WRITES === "1",
+  canvasId: process.env.RH_BRIDGE_CANVAS_ID || null,
+  origin: process.env.RH_BRIDGE_ORIGIN || "https://www.runninghub.ai",
+  generationEnabled: process.env.RH_BRIDGE_ALLOW_GENERATION === "1"
+};
+if (ACCESS_FILE) {
+  try {
+    const stored = JSON.parse(await readFile(ACCESS_FILE, "utf8"));
+    if (SITE_POLICY.parseCanvas(`${stored.origin}/project/canvas/${stored.canvasId}`)) {
+      ACCESS = { ...ACCESS, origin: stored.origin, canvasId: stored.canvasId, allowWrites: stored.allowWrites === true };
+    }
+  } catch (error) { if (error.code !== "ENOENT") throw error; }
+}
+const CLIENT_TTL = 15000;
 const PRODUCT_NAME = "runninghub-canvas-bridge";
-const PRODUCT_VERSION = "0.1.0";
+const PRODUCT_VERSION = "0.4.0";
 const BRIDGE_PROTOCOL_VERSION = "1";
 const RUNTIME_PATH = new URL("./bridge-runtime.js", import.meta.url);
 const events = [];
 const pendingCommands = new Map();
 const commandResults = new Map();
+const commandRecords = new Map();
 const clients = new Map();
 
-const canvasIdFromHref = (href) => {
-  const match = String(href || "").match(/\/projects\/canvas\/([^/?#]+)/);
-  return match ? match[1] : null;
+const canvasIdFromHref = (href) => SITE_POLICY.parseCanvas(href)?.canvasId || null;
+const isCanvasClient = (client) => Boolean(SITE_POLICY.parseCanvas(client?.href)) && Date.now() - Number(client.lastSeenAt || 0) < CLIENT_TTL;
+const cleanHref = (href) => {
+  const canvas = SITE_POLICY.parseCanvas(href);
+  if (!canvas) return null;
+  const url = new URL(href);
+  return url.origin + url.pathname;
 };
 
-const isCanvasClient = (client) => /runninghub\.cn\/projects\/canvas/.test(String(client?.href || ""));
-
 const runtimeInfo = async () => {
-  const [runtime, source] = await Promise.all([stat(RUNTIME_PATH), readFile(RUNTIME_PATH, "utf8")]);
+  const [runtime, runtimeSource, sitePolicy] = await Promise.all([
+    stat(RUNTIME_PATH), readFile(RUNTIME_PATH, "utf8"),
+    readFile(new URL("../extension/site-policy.js", import.meta.url), "utf8")
+  ]);
+  const source = `${sitePolicy}\nwindow.__RUNNINGHUB_CANVAS_BRIDGE_ACCESS__ = ${JSON.stringify(ACCESS)};\n${runtimeSource}`;
   const hash = createHash("sha256").update(source).digest("hex").slice(0, 16);
   return {
     mtimeMs: runtime.mtimeMs,
@@ -41,10 +75,10 @@ const selectClient = async (requestedClientId) => {
     .sort((a, b) => Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0));
   const requested = requestedClientId ? clients.get(requestedClientId) : null;
   const fresh = sorted.filter((client) => !client.runtimeVersion || client.runtimeVersion === runtime.version);
-  const selected = requested || fresh[0] || sorted[0] || null;
+  const selected = requestedClientId ? (requested && isCanvasClient(requested) ? requested : null) : fresh[0] || sorted[0] || null;
   const staleClients = sorted.filter((client) => client.runtimeVersion && client.runtimeVersion !== runtime.version);
   const selectedCanvasId = canvasIdFromHref(selected?.href);
-  const sameCanvasClients = selectedCanvasId ? sorted.filter((client) => canvasIdFromHref(client.href) === selectedCanvasId) : [];
+  const sameCanvasClients = selectedCanvasId ? sorted.filter((client) => SITE_POLICY.parseCanvas(client.href)?.key === SITE_POLICY.parseCanvas(selected.href)?.key) : [];
   const route = {
     selectedClientId: selected?.clientId,
     selectionReason: requested
@@ -81,7 +115,7 @@ const json = (res, status, value) => {
   const body = JSON.stringify(value, null, 2);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
+    ...(res.bridgeOrigin ? { "Access-Control-Allow-Origin": res.bridgeOrigin, Vary: "Origin" } : {}),
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
   });
@@ -91,7 +125,7 @@ const json = (res, status, value) => {
 const javascript = (res, status, body) => {
   res.writeHead(status, {
     "Content-Type": "application/javascript; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
+    ...(res.bridgeOrigin ? { "Access-Control-Allow-Origin": res.bridgeOrigin, Vary: "Origin" } : {}),
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Cache-Control": "no-store"
@@ -102,16 +136,47 @@ const javascript = (res, status, body) => {
 const readBody = (req) =>
   new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 44 * 1024 * 1024) { reject(new Error("Request body too large")); req.destroy(); }
+      else chunks.push(chunk);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 
 const server = http.createServer(async (req, res) => {
   try {
+    if (![ `127.0.0.1:${PORT}`, `localhost:${PORT}` ].includes(req.headers.host)) return json(res, 403, { error: "INVALID_HOST" });
+    const origin = req.headers.origin;
+    if (origin && !SITE_POLICY.origins.includes(origin)) return json(res, 403, { error: "ORIGIN_NOT_ALLOWED" });
+    if (origin) res.bridgeOrigin = origin;
     if (req.method === "OPTIONS") return json(res, 200, { ok: true });
     const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
 
+    const pageRoutes = new Set(["/bridge-runtime.js", "/runtime-version", "/vendor/yjs.js", "/vendor/upload.js", "/commands", "/events", "/health"]);
+    if (origin && ((!pageRoutes.has(url.pathname) && !/^\/media\/[0-9a-f-]{36}$/.test(url.pathname)) || (url.pathname === "/events" && req.method !== "POST"))) {
+      return json(res, 403, { error: "LOCAL_CLIENT_ONLY" });
+    }
+    if (req.method === "POST" && url.pathname === "/media") {
+      const input = JSON.parse(await readBody(req));
+      const canvas = SITE_POLICY.parseCanvas(input.canvasUrl);
+      if (!canvas || !ACCESS.allowWrites || canvas.canvasId !== ACCESS.canvasId || canvas.origin !== ACCESS.origin) return json(res, 403, { error: "CANVAS_NOT_ALLOWED" });
+      return json(res, 200, await mediaTickets.create(input.filePath, canvas.origin));
+    }
+    if (url.pathname === '/archives/binding' && req.method === 'GET') return json(res,200,archives.binding(url.searchParams.get('canvasUrl'),url.searchParams.get('nodeId')));
+    if (url.pathname === '/archives/binding' && req.method === 'POST') return json(res,200,await archives.bind(JSON.parse(await readBody(req))));
+    if (url.pathname === '/archives' && req.method === 'GET') return json(res,200,{ok:true,archives:archives.status(url.searchParams.get('id'))});
+    if (url.pathname === '/archives' && req.method === 'POST') return json(res,200,{ok:true,archive:await archives.add(JSON.parse(await readBody(req)))});
+    if (url.pathname === '/archives/retry' && req.method === 'POST') {const input=JSON.parse(await readBody(req));return json(res,200,{ok:true,archive:await archives.retry(input.archiveId,input.taskId)});}
+    if (req.method === "GET" && /^\/media\/[0-9a-f-]{36}$/.test(url.pathname)) {
+      await mediaTickets.serve(url.pathname.split('/').pop(), origin, res);
+      return;
+    }
+    if (req.method === "GET" && ["/vendor/yjs.js", "/vendor/upload.js"].includes(url.pathname)) {
+      return javascript(res, 200, await readFile(new URL(`.${url.pathname}`, import.meta.url), "utf8"));
+    }
     if (req.method === "GET" && url.pathname === "/bridge-runtime.js") {
       const runtime = await runtimeInfo();
       const source = `window.__RUNNINGHUB_CANVAS_BRIDGE_EXPECTED_VERSION__ = ${JSON.stringify(runtime.version)};\n${runtime.source}`;
@@ -123,9 +188,31 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, runtime);
     }
 
+    if (req.method === "POST" && url.pathname === "/access") {
+      const input = JSON.parse(await readBody(req));
+      const canvas = SITE_POLICY.parseCanvas(input.canvasUrl);
+      if (!canvas || typeof input.allowWrites !== "boolean") return json(res, 400, { error: "INVALID_CANVAS_SCOPE" });
+      if (![...clients.values()].some(client => isCanvasClient(client) && SITE_POLICY.parseCanvas(client.href)?.key === canvas.key)) {
+        return json(res, 409, { error: "CANVAS_NOT_CONNECTED" });
+      }
+      const next = { ...ACCESS, origin: canvas.origin, canvasId: canvas.canvasId, allowWrites: input.allowWrites };
+      if (ACCESS_FILE) {
+        await mkdir(dirname(ACCESS_FILE), { recursive: true });
+        const temp = `${ACCESS_FILE}.${randomUUID()}.tmp`;
+        await writeFile(temp, JSON.stringify(next, null, 2), { mode: 0o600 });
+        await rename(temp, ACCESS_FILE);
+      }
+      ACCESS = next;
+      return json(res, 200, { ok: true, access: ACCESS });
+    }
+
     if (req.method === "POST" && url.pathname === "/events") {
       const body = await readBody(req);
       const event = JSON.parse(body || "{}");
+      if (!event || typeof event !== "object" || !SITE_POLICY.parseCanvas(event.href) || (origin && new URL(event.href).origin !== origin)) {
+        return json(res, 400, { error: "INVALID_PAGE_CLIENT" });
+      }
+      event.href = cleanHref(event.href);
       events.push(event);
       if (event.clientId) {
         clients.set(event.clientId, {
@@ -142,7 +229,12 @@ const server = http.createServer(async (req, res) => {
         });
       }
       if (events.length > 1000) events.splice(0, events.length - 1000);
-      if (event.kind === "command.result" && event.commandId) commandResults.set(event.commandId, event);
+      if (event.kind === "command.result" && event.commandId) {
+        const record = commandRecords.get(event.commandId);
+        if (!record || record.clientId !== event.clientId) return json(res, 409, { error: "UNEXPECTED_COMMAND_RESULT" });
+        commandResults.set(event.commandId, event);
+        record.state = "completed";
+      }
       return json(res, 200, { ok: true });
     }
 
@@ -186,7 +278,8 @@ const server = http.createServer(async (req, res) => {
         version: PRODUCT_VERSION,
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         runtimeUrl: `http://127.0.0.1:${PORT}/bridge-runtime.js`,
-        expectedExtensionMatches: ["https://rhtv.runninghub.cn/*"],
+        expectedExtensionMatches: SITE_POLICY.origins.map((origin) => `${origin}/*`),
+        access: ACCESS,
         connectedCanvasClients: sorted.length,
         route,
         recentEvents,
@@ -197,8 +290,8 @@ const server = http.createServer(async (req, res) => {
           : [
               "Open or refresh a logged-in RunningHub canvas page.",
               "Verify the unpacked extension is enabled in the same Chrome profile as the RunningHub tab.",
-              "If Chrome asks whether rhtv.runninghub.cn can access local devices or services, allow it so the page can reach 127.0.0.1.",
-              "Open the extension details and confirm it matches https://rhtv.runninghub.cn/*."
+              "If the browser asks about local-network access, the canvas needs access to the local bridge.",
+              "Open extension details and confirm this RunningHub site is supported."
             ]
       });
     }
@@ -206,9 +299,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/command") {
       const body = await readBody(req);
       const command = JSON.parse(body || "{}");
+      if (!command || typeof command !== "object" || Array.isArray(command)) return json(res, 400, { error: "INVALID_COMMAND" });
       command.id ||= randomUUID();
       const { route, selected } = await selectClient(command.clientId);
-      const clientId = command.clientId || (command.broadcast ? "broadcast" : route.selectedClientId);
+      const denied = SITE_POLICY.authorizeCommand(command, ACCESS, SITE_POLICY.parseCanvas(selected?.href));
+      if (denied) return json(res, 403, { ok: false, errorCode: denied, generationEnabled: ACCESS.generationEnabled });
+      const clientId = command.clientId || route.selectedClientId;
       const selectedClient = clientId === "broadcast" ? null : selected;
       if (clientId !== "broadcast" && !selectedClient) {
         return json(res, 409, {
@@ -234,6 +330,17 @@ const server = http.createServer(async (req, res) => {
           nextActions: ["Refresh the RunningHub canvas tab so it picks up the latest bridge runtime."]
         });
       }
+      command.canvasId = route.canvasId;
+      command.canvasOrigin = SITE_POLICY.parseCanvas(selected.href).origin;
+      const { clientId: ignoredClient, expiresAt: ignoredExpiry, ...identity } = command;
+      const fingerprint = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+      const previous = commandRecords.get(command.id);
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) return json(res, 409, { errorCode: "REQUEST_ID_CONFLICT" });
+        return json(res, 200, { ok: true, id: command.id, clientId: previous.clientId, route, duplicate: true, state: previous.state });
+      }
+      command.expiresAt = Date.now() + Math.min(Math.max(Number(command.queueTimeoutMs) || 30000, 1000), 60000);
+      commandRecords.set(command.id, { fingerprint, clientId, state: "queued" });
       const queue = pendingCommands.get(clientId) || [];
       queue.push(command);
       pendingCommands.set(clientId, queue);
@@ -242,17 +349,27 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/commands") {
       const clientId = url.searchParams.get("clientId") || "";
+      const client = clients.get(clientId);
+      const href = cleanHref(url.searchParams.get("href"));
+      if (!client || !href || (origin && new URL(href).origin !== origin)) return json(res, 403, { error: "UNKNOWN_PAGE_CLIENT" });
+      client.lastSeenAt = Date.now();
+      client.href = href;
       let commands = [];
       const direct = pendingCommands.get(clientId);
       if (direct?.length) {
         commands = commands.concat(direct.splice(0));
         pendingCommands.set(clientId, direct);
       }
-      const broadcast = pendingCommands.get("broadcast");
-      if (broadcast?.length) {
-        commands = commands.concat(broadcast.splice(0));
-        pendingCommands.set("broadcast", broadcast);
-      }
+      commands = commands.filter(command => {
+        const record = commandRecords.get(command.id);
+        if (command.expiresAt < Date.now()) {
+          record.state = "expired";
+          commandResults.set(command.id, { ok: false, errorCode: "COMMAND_EXPIRED", commandId: command.id });
+          return false;
+        }
+        record.state = "dispatched";
+        return true;
+      });
       return json(res, 200, commands);
     }
 
@@ -268,6 +385,7 @@ const server = http.createServer(async (req, res) => {
         version: PRODUCT_VERSION,
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         events: events.length,
+        access: ACCESS,
         pendingClients: pendingCommands.size
       });
     }

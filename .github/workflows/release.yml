@@ -20,6 +20,18 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install media inspection tools
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Test
+        run: npm test
+
+      - name: Build browser dependencies
+        run: npm run build
+
       - name: Verify release
         run: npm run release:check
 
@@ -41,8 +53,9 @@ jobs:
           - Extension checksum: runninghub-canvas-bridge-extension-v${VERSION}.sha256
 
           Install:
-          - npm: npm install -g runninghub-canvas-bridge
           - GitHub asset: npm install -g ./runninghub-canvas-bridge-${VERSION}.tgz
+          - Source: https://github.com/${GITHUB_REPOSITORY}
+          - Requires Node.js 20.19+, ffmpeg/ffprobe and logged-in Chrome.
 
           Browser extension:
           1. Download and unzip runninghub-canvas-bridge-extension-v${VERSION}.zip.

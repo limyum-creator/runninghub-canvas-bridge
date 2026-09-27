@@ -13,7 +13,13 @@ Primary integration shape:
 - local bridge server
 - Chrome extension injected into the logged-in RunningHub page
 - page-context API calls
-- eventual MCP server or Codex plugin
+- stdio MCP server
+
+## Documentation ownership
+
+- Keep reusable installation and usage guidance in README.md, AGENT_INSTALL.md and AGENT_QUICKSTART.md.
+- If local-private/LOCAL_SETUP.md exists, read it for owner-machine installation and test setup. This directory is Git-ignored and excluded from release packages; do not publish its contents.
+- Production projects own their canvas IDs, prompts, references, task receipts, media and approval state. Keep those in their project directories; do not relocate them into this repository just because they use this MCP.
 
 ## Communication
 
@@ -35,5 +41,5 @@ Primary integration shape:
 
 - `node --check server/server.mjs`
 - `node server/server.mjs`
-- `curl http://127.0.0.1:8765/health`
-- `curl http://127.0.0.1:8765/events`
+- `curl http://127.0.0.1:18765/health`
+- `node scripts/mcp-call.mjs rh_status`

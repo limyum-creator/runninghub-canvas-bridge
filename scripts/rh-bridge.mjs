@@ -1,10 +1,11 @@
 #!/usr/bin/env node
+// Modified 2026-09-27: scoped editing, uploads and generation; MCP is preferred.
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-const DEFAULT_BRIDGE = "http://127.0.0.1:8765";
+const DEFAULT_BRIDGE = "http://127.0.0.1:18765";
 const bridge = process.env.RH_BRIDGE_URL || DEFAULT_BRIDGE;
-const MANIFEST_VERSION = "2026-05-24";
+const MANIFEST_VERSION = "2026-09-27";
 
 const AGENT_MANIFEST = {
   name: "runninghub-canvas-bridge",
@@ -14,8 +15,11 @@ const AGENT_MANIFEST = {
   safety: {
     localOnlyByDefault: true,
     secretsPolicy: "Do not print, store, or commit cookies, tokens, authorization headers, or private payloads.",
-    defaultBeforePaidGeneration: "Run generate-video-node with --dry-run, inspect validation.ok, then run without --dry-run only when explicitly allowed.",
-    dangerousCommands: ["page.eval", "api-post", "run-node without --validate-references"]
+    generationAvailable: true,
+    generationEnabled: "Read live health.access.generationEnabled; configure RH_BRIDGE_ALLOW_GENERATION=1.",
+    uploadAvailable: true,
+    writesRequireCanvasScope: true,
+    disabledCommands: ["page.eval", "api-post", "create-text-workflow"]
   },
   preflight: {
     command: "node scripts/rh-bridge.mjs preflight",
@@ -28,26 +32,10 @@ const AGENT_MANIFEST = {
       "node scripts/rh-bridge.mjs preflight",
       "node scripts/rh-bridge.mjs canvas-summary"
     ],
-    localReferenceUpload: [
-      "node scripts/rh-bridge.mjs upload-local-reference-image --file <path> --config-json '{\"x\":300,\"y\":300}'",
-      "Use result.primaryReference.nodeId or result.usableReferences[].nodeId as direct upstream image references."
-    ],
-    urlReference: [
-      "node scripts/rh-bridge.mjs create-reference-from-url --url <imageUrl> --config-json '{\"x\":300,\"y\":300}'",
-      "Use result.primaryReference.nodeId as a direct upstream image reference."
-    ],
-    videoGeneration: [
-      "node scripts/rh-bridge.mjs preflight",
-      "node scripts/rh-bridge.mjs generate-video-node <videoNodeId> --dry-run --append-prompt <constraints>",
-      "Confirm validation.ok is true, references all have hasDirectUpstreamImage true, and run is null.",
-      "node scripts/rh-bridge.mjs generate-video-node <videoNodeId> --timeout <ms> --append-prompt <constraints>",
-      "node scripts/rh-bridge.mjs poll-node-result <videoNodeId> --poll-timeout <ms>"
-    ],
-    safeLowLevelVideoGeneration: [
-      "node scripts/rh-bridge.mjs prepare-video-node <videoNodeId> --dry-run",
-      "node scripts/rh-bridge.mjs prepare-video-node <videoNodeId>",
-      "node scripts/rh-bridge.mjs validate-video-run <videoNodeId>",
-      "node scripts/rh-bridge.mjs run-node <videoNodeId> --validate-references"
+    canvasEditing: [
+      "node scripts/rh-bridge.mjs canvas-summary",
+      "node scripts/rh-bridge.mjs create-text-node --dry-run --config-json '{\"text\":\"Bridge test\",\"x\":100,\"y\":100}'",
+      "Enable writes for one chosen canvas, then repeat the intended edit without --dry-run."
     ]
   },
   commands: {
@@ -165,7 +153,7 @@ const AGENT_MANIFEST = {
       supportsDryRun: false
     },
     "upload-local-reference-image": {
-      summary: "Create a staging image node, upload a local file, and return directly usable reference node ids and URLs.",
+      summary: "Upload an image through native canvas storage and create a usable reference node with its URL.",
       requiresPageClient: true,
       mutatesCanvas: true,
       costsCredits: false,
@@ -205,7 +193,7 @@ const AGENT_MANIFEST = {
       successField: "ok"
     },
     "generate-video-node": {
-      summary: "High-level safe video flow: prepare, validate, then run.",
+      summary: "Legacy video flow: prepare, validate, then run. Not adapted for native H3; use MCP template/params/run tools for H3.",
       requiresPageClient: true,
       mutatesCanvas: true,
       costsCredits: true,
@@ -218,8 +206,8 @@ const AGENT_MANIFEST = {
       requiresPageClient: true,
       mutatesCanvas: true,
       costsCredits: true,
-      supportsDryRun: false,
-      safeUsage: "For videos, pass --validate-references."
+      supportsDryRun: true,
+      safeUsage: "Prefer MCP rh_run_node with a stable requestId. --dry-run previews without submitting."
     },
     "poll-node-result": {
       summary: "Poll one node until output URLs are available or a terminal status is observed.",
@@ -263,6 +251,11 @@ const AGENT_MANIFEST = {
   }
 };
 
+for (const name of AGENT_MANIFEST.safety.disabledCommands) delete AGENT_MANIFEST.commands[name];
+AGENT_MANIFEST.stableErrorCodes.READ_ONLY = "Canvas editing is disabled by the local server.";
+AGENT_MANIFEST.stableErrorCodes.CANVAS_NOT_ALLOWED = "This canvas is not the configured edit target.";
+AGENT_MANIFEST.stableErrorCodes.COMMAND_DISABLED = "This release does not enable this command.";
+
 const usage = `Usage:
   node scripts/rh-bridge.mjs health
   node scripts/rh-bridge.mjs agent-manifest
@@ -285,7 +278,6 @@ const usage = `Usage:
   node scripts/rh-bridge.mjs connections <nodeId> [--client <clientId>] [--timeout <ms>] [--direction <both|upstream|downstream>] [--depth <n>] [--summary] [--fields <csv>] [--no-outputs] [--no-params] [--text-preview-length <n>]
   node scripts/rh-bridge.mjs find-reference-candidates --text <description> [--client <clientId>] [--timeout <ms>] [--limit <n>] [--include-urls] [--text-preview-length <n>]
   node scripts/rh-bridge.mjs describe-image-node <nodeId> [--client <clientId>] [--timeout <ms>] [--include-urls] [--text-preview-length <n>]
-  node scripts/rh-bridge.mjs create-text-workflow [--client <clientId>] [--timeout <ms>] [--config-json <json>] [--dry-run]
   node scripts/rh-bridge.mjs create-text-node [--client <clientId>] [--timeout <ms>] [--config-json <json>] [--dry-run]
   node scripts/rh-bridge.mjs create-text-nodes [--client <clientId>] [--timeout <ms>] [--config-json <json-array>] [--x <n>] [--y <n>] [--gap-x <n>] [--gap-y <n>] [--dry-run]
   node scripts/rh-bridge.mjs suggest-empty-region [--client <clientId>] [--timeout <ms>] [--near-text <text>] [--around-node <nodeId>] [--direction <right-down|right-up|left-down|left-up>] [--width <n>] [--height <n>] [--padding <n>]
@@ -295,14 +287,11 @@ const usage = `Usage:
   node scripts/rh-bridge.mjs create-image-node [--client <clientId>] [--timeout <ms>] [--config-json <json>] [--dry-run]
   node scripts/rh-bridge.mjs prepare-image-workflow [--client <clientId>] [--timeout <ms>] [--config-json <json>] [--dry-run] [--full]
   node scripts/rh-bridge.mjs create-reference-image-node [--client <clientId>] [--timeout <ms>] [--config-json <json>] [--dry-run]
-  node scripts/rh-bridge.mjs upload-reference-image <nodeId> --file <path> [--client <clientId>] [--timeout <ms>] [--input-index <n>] [--wait-ms <ms>]
-  node scripts/rh-bridge.mjs upload-local-reference-image --file <path> [--client <clientId>] [--timeout <ms>] [--config-json <json>] [--input-index <n>] [--wait-ms <ms>] [--connect-to-node <nodeId>]
   node scripts/rh-bridge.mjs create-reference-from-url --url <url> [--client <clientId>] [--timeout <ms>] [--config-json <json>] [--connect-to-node <nodeId>] [--dry-run]
   node scripts/rh-bridge.mjs prepare-video-node <nodeId> [--client <clientId>] [--timeout <ms>] [--max-depth <n>] [--prompt <text>] [--append-prompt <text>] [--prompt-merge-mode <merge|replace|append>] [--reference-node-ids-json <json>] [--dry-run]
   node scripts/rh-bridge.mjs validate-video-run <nodeId> [--client <clientId>] [--timeout <ms>] [--allow-no-references]
   node scripts/rh-bridge.mjs validate-node-run <nodeId> [--client <clientId>] [--timeout <ms>] [--require-references]
-  node scripts/rh-bridge.mjs generate-video-node <nodeId> [--client <clientId>] [--timeout <ms>] [--max-depth <n>] [--run-max-depth <n>] [--prompt <text>] [--append-prompt <text>] [--reference-node-ids-json <json>] [--dry-run]
-  node scripts/rh-bridge.mjs run-node <nodeId> [--client <clientId>] [--timeout <ms>] [--max-depth <n>] [--validate-references]
+  node scripts/rh-bridge.mjs run-node <nodeId> [--client <clientId>] [--timeout <ms>] [--validate-references] [--dry-run]
   node scripts/rh-bridge.mjs poll-node-result <nodeId> [--client <clientId>] [--timeout <ms>] [--poll-timeout <ms>] [--poll-interval <ms>] [--allow-no-output]
   node scripts/rh-bridge.mjs poll-task-result <taskId> [--client <clientId>] [--timeout <ms>] [--poll-timeout <ms>] [--poll-interval <ms>] [--allow-no-output]
   node scripts/rh-bridge.mjs connect-nodes <sourceId> <targetId> [--client <clientId>] [--timeout <ms>] [--dry-run]
@@ -315,7 +304,6 @@ const usage = `Usage:
   node scripts/rh-bridge.mjs delete-elements <id...> [--client <clientId>] [--timeout <ms>] [--dry-run]
   node scripts/rh-bridge.mjs get-canvas-detail <canvasId> [--timeout <ms>] [--body-json <json>]
   node scripts/rh-bridge.mjs workflow-list <canvasId> [--timeout <ms>] [--body-json <json>]
-  node scripts/rh-bridge.mjs api-post <endpoint> [--body-json <json>] [--timeout <ms>]
   node scripts/rh-bridge.mjs result <commandId>
 
 Environment:
@@ -491,19 +479,8 @@ const commandTypesFromCapabilities = (capabilities) => {
 
 const preflight = async ({ clientId, timeoutMs }) => {
   const requiredRuntimeCommands = [
-    "canvas.uploadLocalReferenceImage",
-    "canvas.createReferenceFromUrl",
-    "canvas.summary",
-    "canvas.findReferenceCandidates",
-    "canvas.describeImageNode",
-    "canvas.prepareImageWorkflow",
-    "canvas.prepareVideoNode",
-    "canvas.validateVideoRun",
-    "canvas.validateNodeRun",
-    "canvas.generateVideoNode",
-    "canvas.runNode",
-    "canvas.pollNodeResult",
-    "canvas.pollTaskResult"
+    "graph.snapshot", "canvas.summary", "canvas.getElement", "canvas.createTextNode",
+    "canvas.updateNodeText", "canvas.moveNodes", "canvas.connectNodes"
   ];
   const checks = {};
   const blockingReasons = [];
@@ -749,7 +726,7 @@ if (commandName === "agent-manifest") {
 } else if (commandName === "get-element") {
   const id = args.shift();
   if (!id) fail("Missing id");
-  print(await enqueue({ ...baseCommand, type: "canvas.getElement", id }, timeoutMs));
+  print(await enqueue({ ...baseCommand, type: "canvas.getElement", elementId: id }, timeoutMs));
 } else if (commandName === "inspect-node-template") {
   const nodeId = args.shift();
   if (!nodeId) fail("Missing nodeId");
@@ -996,7 +973,7 @@ if (commandName === "agent-manifest") {
 } else if (commandName === "run-node") {
   const nodeId = args.shift();
   if (!nodeId) fail("Missing nodeId");
-  print(await enqueue({ ...baseCommand, type: "canvas.runNode", nodeId, maxDepth: Number(maxDepth), validateReferences }, timeoutMs));
+  print(await enqueue({ ...baseCommand, type: "canvas.runNode", nodeId, maxDepth: Number(maxDepth), validateReferences, dryRun }, timeoutMs));
 } else if (commandName === "poll-node-result") {
   const nodeId = args.shift();
   if (!nodeId) fail("Missing nodeId");
