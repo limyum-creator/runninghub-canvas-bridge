@@ -50,7 +50,7 @@ export async function downloadOutput(url,path,{fetcher=fetch,maxBytes=256*1024**
     if (!size) throw new Error('EMPTY_OUTPUT');
     const media=await inspectMedia(temporary);
     if (media.sha256!==digest.digest('hex')) throw new Error('OUTPUT_SHA_MISMATCH');
-    const fd=await open(temporary,'r');await fd.sync();await fd.close();
+    const fd=await open(temporary,'r+');try{await fd.sync();}finally{await fd.close();}
     await rename(temporary,path);
     return media;
   } catch(error) {await unlink(temporary).catch(()=>{});throw error;}

@@ -11,8 +11,11 @@ import { messageYjsSyncStep1 } from "y-protocols/sync";
 
 const siteSource = await readFile(new URL("../extension/site-policy.js", import.meta.url), "utf8");
 const runtimeSource = (await readFile(new URL("../server/bridge-runtime.js", import.meta.url), "utf8"))
+  .replace(/\r\n/g, "\n")
   .replace('import(`${BRIDGE}/vendor/yjs.js`)', "Promise.resolve(globalThis.testDependencies)")
   .replace("  pollCommands();\n})();", "  window.testHooks = { withCanvasYjs, executeCommand, getNodeTitle };\n})();");
+
+assert.ok(runtimeSource.includes("window.testHooks ="), "Runtime test hooks must replace the live poll loop");
 
 function fixture({ emptySchema = false, allowWrites = false, canvasId = "fixture", generationEnabled = false, apiData = {} } = {}) {
   const remoteDoc = new Y.Doc();
