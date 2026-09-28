@@ -5,10 +5,11 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 export async function withLumen(fn) {
-  const configPath=process.env.RH_LUMEN_MCP_CONFIG || join(homedir(),'Library/Application Support/Lumen/mcp-client.json');
+  const configPath=process.env.RH_LUMEN_MCP_CONFIG || (process.platform === 'darwin' ? join(homedir(),'Library/Application Support/Lumen/mcp-client.json') : null);
+  if (!configPath) throw new Error("LUMEN_MCP_NOT_CONFIGURED: set RH_LUMEN_MCP_CONFIG to the exported MCP client configuration");
   const settings=JSON.parse(await readFile(configPath,'utf8')).mcpServers?.lumen;
   if (!settings?.command || !Array.isArray(settings.args)) throw new Error('LUMEN_MCP_NOT_CONFIGURED');
-  const client=new Client({name:'runninghub-archive',version:'0.4.0'});
+  const client=new Client({name:'runninghub-archive',version:'0.5.0'});
   const transport=new StdioClientTransport({...settings,stderr:'pipe'});
   const call=async(name,args)=>{
     const result=await client.callTool({name,arguments:args},undefined,{timeout:180000});

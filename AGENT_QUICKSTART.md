@@ -27,3 +27,14 @@ node scripts/mcp-call.mjs rh_update_params --canvas 'connected canvas URL' --wri
 ```
 
 The input file contains the tool's JSON arguments. Keep private payload files outside the source repository. Current docs and live capabilities take precedence over historical upstream examples.
+
+
+### Assets, references and concurrent editing
+
+1. Select a canvas once per MCP connection. A read-only connection does not revoke another connection's edit access. Re-select after a bridge restart; sessions are intentionally not persisted.
+2. Search with `rh_search_assets`. Browse `groups`/`items` or `folders`/`children`/`folderItems` with exact returned IDs. Use `assetToken` with `rh_add_asset` on the same connection within 15 minutes; no upload is repeated.
+3. Inspect actual outputs with `rh_inspect_references`. Call `rh_model_schema` with the node's modelCode and mode as an uppercase underscore type. Bind explicit `parameter`, `kind`, `sourceNodeId` and, for multiple outputs, `url`. Set `array` only for array-valued parameters. Binding preserves other slots; it does not change model, mode, prompt or submit generation.
+4. `rh_get_node` returns `revision`. Batch edits require that exact revision for every target. `EDIT_CONFLICT` means reread and reconcile, not retry the same stale patch. Simple node/parameter edits accept `expectedRevisions: {nodeId: revision}`.
+5. Request IDs returned after submission are scoped to the connection and remain queryable by their returned wire ID from another connection while the bridge is running. Original caller IDs are recoverable within the original connection. Restart loses in-memory command receipts; inspect platform state before resubmitting.
+
+Windows uses the same MCP server (`node` plus an absolute path to `server/mcp.mjs`). JSON paths may use forward slashes or escaped backslashes. `RH_FFPROBE` points to ffprobe.exe; `RH_LUMEN_MCP_CONFIG` is required for optional Lumen archiving on Windows. Do not copy a Mac's local paths into a Windows client configuration.

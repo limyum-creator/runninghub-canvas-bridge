@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 23 个标准 MCP 工具，配套 HTTP 与 CLI，可接入 Codex 或其他支持 stdio MCP 的客户端。
+- 30 个标准 MCP 工具，配套 HTTP 与 CLI，可接入 Codex 或其他支持 stdio MCP 的客户端。
 - 图片、视频、音频上传和生成入口均可用。三类上传已在国际站实测；生成已验证请求预览及模拟提交，本次没有额外提交真实生成。
 - 支持文本创建、编辑、移动、连线、删除、刷新后回读，以及空白 H3 模板复制预览。
 - 按完整画布网址选择操作目标，支持多标签页。编辑前选择 `allowWrites: true`，无需每次重启服务。
@@ -89,3 +89,20 @@ npm pack --pack-destination dist
 扩展 ZIP 与源码包输出到 `dist/`。扩展需配套本地服务运行，端口统一为 18765。历史文档保留上游记录，以本文和实时能力为准。
 
 基于 [windzu/runninghub-canvas-bridge](https://github.com/windzu/runninghub-canvas-bridge)，Apache-2.0。署名见 [UPSTREAM.md](UPSTREAM.md)，改动见 [CHANGELOG.md](CHANGELOG.md)。
+
+## v0.5 功能
+
+- `rh_search_assets` 浏览或搜索平台资产库，`rh_add_asset` 复用图片、视频、音频；同一 URL 已在画布时复用现有节点。资产选择有效期 15 分钟，需保持同一个 MCP 连接及画布标签页。
+- `rh_inspect_references` 识别实际媒体输出，包括 `rh-ai` 节点；`rh_bind_references` 按实时参数名写入参考并连接节点。多个输出时明确选择 URL，未指定的参考槽保持原状。
+- `rh_list_models` / `rh_model_schema` 实时读取模型及参数配置，返回选项、默认值、范围和原始条件；不据此推断价格、权益或可生成性。
+- MCP 连接独立保存所选画布与读写范围。同一画布的桥接修改串行执行。`rh_get_node` 返回版本指纹，`rh_batch_update_nodes` 要求逐节点版本；版本不匹配时整批拒绝。普通参数和节点修改也可传 `expectedRevisions`。
+
+版本检查针对已同步的节点和连线，不能替代平台对跨浏览器编辑的全局事务。提交后断连且没有回执的修改保持未知，不自动重发；后续修改可能排队超时，需要核对画布再重启服务。
+
+## Windows
+
+Windows 10/11 使用 Node.js 20.19+、Chrome 或 Edge，以及 PATH 中的 `ffprobe.exe`（或设置 `RH_FFPROBE` 为完整路径）。在项目目录执行 `npm ci`、`npm run build`，然后 `npm run service:install`。扩展加载步骤与 macOS 相同。
+
+后台服务使用当前用户的登录启动目录，无需管理员权限。支持 `service:start`、`service:stop`、`service:restart`、`service:status`、`service:uninstall`。运行日志位于用户主目录 `.runninghub-canvas-bridge/logs`，卸载保留归档与配置。企业策略禁用 Windows Script Host 时可用 `npm start` 前台运行。
+
+PowerShell 如需开启生成，在安装服务前设置 `$env:RH_BRIDGE_ALLOW_GENERATION="1"`。可选光栈归档需设置 `$env:RH_LUMEN_MCP_CONFIG` 指向光栈导出的 MCP 配置文件；未配置不影响画布编辑和生成。文件路径必须属于运行 MCP/桥接的同一台电脑。

@@ -32,7 +32,7 @@ if (ACCESS_FILE) {
 }
 const CLIENT_TTL = 15000;
 const PRODUCT_NAME = "runninghub-canvas-bridge";
-const PRODUCT_VERSION = "0.4.0";
+const PRODUCT_VERSION = "0.5.0";
 const BRIDGE_PROTOCOL_VERSION = "1";
 const RUNTIME_PATH = new URL("./bridge-runtime.js", import.meta.url);
 const events = [];
@@ -40,6 +40,9 @@ const pendingCommands = new Map();
 const commandResults = new Map();
 const commandRecords = new Map();
 const clients = new Map();
+const sessions = new Map();
+const canvasMutations = new Map();
+const accessFor = input => input.sessionId ? sessions.get(input.sessionId) : ACCESS;
 
 const canvasIdFromHref = (href) => SITE_POLICY.parseCanvas(href)?.canvasId || null;
 const isCanvasClient = (client) => Boolean(SITE_POLICY.parseCanvas(client?.href)) && Date.now() - Number(client.lastSeenAt || 0) < CLIENT_TTL;
@@ -51,11 +54,12 @@ const cleanHref = (href) => {
 };
 
 const runtimeInfo = async () => {
-  const [runtime, runtimeSource, sitePolicy] = await Promise.all([
+  const [runtime, runtimeSource, sitePolicy, features] = await Promise.all([
     stat(RUNTIME_PATH), readFile(RUNTIME_PATH, "utf8"),
-    readFile(new URL("../extension/site-policy.js", import.meta.url), "utf8")
+    readFile(new URL("../extension/site-policy.js", import.meta.url), "utf8"),
+    readFile(new URL("./canvas-features.js", import.meta.url), "utf8")
   ]);
-  const source = `${sitePolicy}\nwindow.__RUNNINGHUB_CANVAS_BRIDGE_ACCESS__ = ${JSON.stringify(ACCESS)};\n${runtimeSource}`;
+  const source = `${sitePolicy}\n${features}\nwindow.__RUNNINGHUB_CANVAS_BRIDGE_URL__ = "http://127.0.0.1:${PORT}";\nwindow.__RUNNINGHUB_CANVAS_BRIDGE_ACCESS__ = ${JSON.stringify({ ...ACCESS, allowWrites: false, canvasId: null, origin: null })};\n${runtimeSource}`;
   const hash = createHash("sha256").update(source).digest("hex").slice(0, 16);
   return {
     mtimeMs: runtime.mtimeMs,
@@ -162,7 +166,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/media") {
       const input = JSON.parse(await readBody(req));
       const canvas = SITE_POLICY.parseCanvas(input.canvasUrl);
-      if (!canvas || !ACCESS.allowWrites || canvas.canvasId !== ACCESS.canvasId || canvas.origin !== ACCESS.origin) return json(res, 403, { error: "CANVAS_NOT_ALLOWED" });
+      const scope = accessFor(input);
+      if (!canvas || !scope?.allowWrites || canvas.canvasId !== scope.canvasId || canvas.origin !== scope.origin) return json(res, 403, { error: "CANVAS_NOT_ALLOWED" });
       return json(res, 200, await mediaTickets.create(input.filePath, canvas.origin));
     }
     if (url.pathname === '/archives/binding' && req.method === 'GET') return json(res,200,archives.binding(url.searchParams.get('canvasUrl'),url.searchParams.get('nodeId')));
@@ -186,6 +191,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/runtime-version") {
       const { source, ...runtime } = await runtimeInfo();
       return json(res, 200, runtime);
+    }
+
+    if (req.method === "POST" && url.pathname === "/sessions") {
+      const input = JSON.parse(await readBody(req));
+      const canvas = SITE_POLICY.parseCanvas(input.canvasUrl);
+      if (!canvas || typeof input.allowWrites !== 'boolean') return json(res,400,{error:'INVALID_CANVAS_SCOPE'});
+      if (![...clients.values()].some(c => isCanvasClient(c) && SITE_POLICY.parseCanvas(c.href)?.key === canvas.key)) return json(res,409,{error:'CANVAS_NOT_CONNECTED'});
+      const id = input.sessionId || randomUUID();
+      if (input.sessionId && !sessions.has(id)) return json(res,409,{error:'SESSION_EXPIRED: select again without a session ID'});
+      const access = {...ACCESS, origin:canvas.origin, canvasId:canvas.canvasId, allowWrites:input.allowWrites};
+      sessions.set(id,access);
+      return json(res,200,{ok:true,sessionId:id,access});
     }
 
     if (req.method === "POST" && url.pathname === "/access") {
@@ -234,6 +251,7 @@ const server = http.createServer(async (req, res) => {
         if (!record || record.clientId !== event.clientId) return json(res, 409, { error: "UNEXPECTED_COMMAND_RESULT" });
         commandResults.set(event.commandId, event);
         record.state = "completed";
+        if (canvasMutations.get(record.canvasKey) === event.commandId) canvasMutations.delete(record.canvasKey);
       }
       return json(res, 200, { ok: true });
     }
@@ -302,7 +320,10 @@ const server = http.createServer(async (req, res) => {
       if (!command || typeof command !== "object" || Array.isArray(command)) return json(res, 400, { error: "INVALID_COMMAND" });
       command.id ||= randomUUID();
       const { route, selected } = await selectClient(command.clientId);
-      const denied = SITE_POLICY.authorizeCommand(command, ACCESS, SITE_POLICY.parseCanvas(selected?.href));
+      const scope = accessFor(command);
+      if (!scope) return json(res,409,{errorCode:'SESSION_EXPIRED'});
+      if (command.sessionId && selected && (scope.canvasId !== canvasIdFromHref(selected.href) || scope.origin !== SITE_POLICY.parseCanvas(selected.href).origin)) return json(res,403,{errorCode:'SESSION_CANVAS_MISMATCH'});
+      const denied = SITE_POLICY.authorizeCommand(command, scope, SITE_POLICY.parseCanvas(selected?.href));
       if (denied) return json(res, 403, { ok: false, errorCode: denied, generationEnabled: ACCESS.generationEnabled });
       const clientId = command.clientId || route.selectedClientId;
       const selectedClient = clientId === "broadcast" ? null : selected;
@@ -332,6 +353,7 @@ const server = http.createServer(async (req, res) => {
       }
       command.canvasId = route.canvasId;
       command.canvasOrigin = SITE_POLICY.parseCanvas(selected.href).origin;
+      delete command.access;
       const { clientId: ignoredClient, expiresAt: ignoredExpiry, ...identity } = command;
       const fingerprint = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
       const previous = commandRecords.get(command.id);
@@ -340,7 +362,8 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { ok: true, id: command.id, clientId: previous.clientId, route, duplicate: true, state: previous.state });
       }
       command.expiresAt = Date.now() + Math.min(Math.max(Number(command.queueTimeoutMs) || 30000, 1000), 60000);
-      commandRecords.set(command.id, { fingerprint, clientId, state: "queued" });
+      command.access = {...scope, generationEnabled:ACCESS.generationEnabled};
+      commandRecords.set(command.id, { fingerprint, clientId, state: "queued", canvasKey: SITE_POLICY.parseCanvas(selected.href).key });
       const queue = pendingCommands.get(clientId) || [];
       queue.push(command);
       pendingCommands.set(clientId, queue);
@@ -367,6 +390,20 @@ const server = http.createServer(async (req, res) => {
           commandResults.set(command.id, { ok: false, errorCode: "COMMAND_EXPIRED", commandId: command.id });
           return false;
         }
+        if (SITE_POLICY.parseCanvas(href)?.key !== record.canvasKey) {
+          record.state = 'expired';
+          commandResults.set(command.id,{ok:false,errorCode:'CANVAS_MISMATCH',commandId:command.id});
+          return false;
+        }
+        const mode = SITE_POLICY.commandMode(command);
+        if (mode === 'edit' || mode === 'generate') {
+          if (canvasMutations.has(record.canvasKey)) {
+            const queue = pendingCommands.get(clientId) || [];
+            queue.push(command); pendingCommands.set(clientId,queue);
+            return false;
+          }
+          canvasMutations.set(record.canvasKey,command.id);
+        }
         record.state = "dispatched";
         return true;
       });
@@ -386,7 +423,9 @@ const server = http.createServer(async (req, res) => {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         events: events.length,
         access: ACCESS,
-        pendingClients: pendingCommands.size
+        pendingClients: pendingCommands.size,
+        activeMutations: canvasMutations.size,
+        sessions: sessions.size
       });
     }
 

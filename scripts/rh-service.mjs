@@ -7,6 +7,11 @@ import { fileURLToPath } from "node:url";
 import { homedir, platform, userInfo } from "node:os";
 
 const action = process.argv[2] || "status";
+if (platform() === 'win32') {
+  try { console.log(JSON.stringify(await (await import('./windows-service.mjs')).windowsService(action),null,2)); }
+  catch(error) { console.error(JSON.stringify({ok:false,error:error.message}));process.exitCode=1; }
+  process.exit(process.exitCode || 0);
+}
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const label = "cn.runninghub.canvas-bridge";
 const plistPath = resolve(homedir(), "Library/LaunchAgents", `${label}.plist`);
@@ -147,6 +152,7 @@ const uninstall = () => {
 
 if (action === "install") await install();
 else if (action === "start") await start();
+else if (action === "stop") { stop(); print({ok:true, action:"stop"}); }
 else if (action === "status") print(serviceStatus());
 else if (action === "restart") {
   stop();

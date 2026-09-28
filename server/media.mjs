@@ -1,7 +1,7 @@
 // Added 2026-09-27: verified local media and bounded streaming upload tickets.
 import { createReadStream } from 'node:fs';
 import { lstat, realpath, open } from 'node:fs/promises';
-import { basename, isAbsolute, join } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -15,8 +15,11 @@ export async function sha256(path) {
 }
 export async function inspectMedia(path) {
   if (!isAbsolute(path)) throw new Error('Use an absolute local media path');
+  path = resolve(path);
   const info = await lstat(path);
-  if (!info.isFile() || await realpath(path) !== path || info.size === 0 || info.size > limits.video) throw new Error('Media must be a regular nonempty file, at most 500 MiB, without symlinks');
+  const actual = await realpath(path);
+  const samePath = process.platform === 'win32' ? actual.toLowerCase() === path.toLowerCase() : actual === path;
+  if (!info.isFile() || !samePath || info.size === 0 || info.size > limits.video) throw new Error('Media must be a regular nonempty file, at most 500 MiB, without symlinks');
   const fd = await open(path, 'r');
   const head = Buffer.alloc(32);
   try { await fd.read(head, 0, 32, 0); } finally { await fd.close(); }
@@ -24,11 +27,11 @@ export async function inspectMedia(path) {
   if (head.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) [mime,extension,kind]=['image/png','.png','image'];
   else if (head[0]===255 && head[1]===216) [mime,extension,kind]=['image/jpeg','.jpg','image'];
   else if (head.toString('ascii',0,4)==='RIFF' && head.toString('ascii',8,12)==='WEBP') [mime,extension,kind]=['image/webp','.webp','image'];
-  const candidates = [process.env.RH_FFPROBE, join(homedir(),'.local/bin/ffprobe'), '/opt/homebrew/bin/ffprobe','/usr/local/bin/ffprobe','ffprobe'].filter(Boolean);
+  const candidates = [process.env.RH_FFPROBE, ...(process.platform === 'win32' ? [join(homedir(),'.local','bin','ffprobe.exe'),'ffprobe.exe'] : [join(homedir(),'.local/bin/ffprobe'), '/opt/homebrew/bin/ffprobe','/usr/local/bin/ffprobe','ffprobe'])].filter(Boolean);
   let probe;
   for (const command of candidates) {
     try {
-      const { stdout } = await execute(command, ['-v','error','-show_format','-show_streams','-of','json',path], { timeout: 20000, maxBuffer: 1024 ** 2 });
+      const { stdout } = await execute(command, ['-v','error','-show_format','-show_streams','-of','json',path], { windowsHide: true, timeout: 20000, maxBuffer: 1024 ** 2 });
       probe=JSON.parse(stdout); break;
     } catch (error) { if (error.code !== 'ENOENT') throw new Error('MEDIA_UNREADABLE: ffprobe could not decode media metadata'); }
   }

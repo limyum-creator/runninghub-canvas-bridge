@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Modified 2026-09-27: include site policy and attribution in extension packages.
-import { spawnSync } from "node:child_process";
+import { zipFiles } from "./zip.mjs";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -40,11 +40,7 @@ mkdirSync(distDir, { recursive: true });
 if (existsSync(zipPath)) rmSync(zipPath);
 if (existsSync(checksumPath)) rmSync(checksumPath);
 
-const zip = spawnSync("zip", ["-qr", zipPath, "manifest.json", "site-policy.js", "bridge-main.js", "LICENSE", "UPSTREAM.md"], {
-  cwd: extensionDir,
-  encoding: "utf8"
-});
-if (zip.status !== 0) fail("Failed to create extension zip. Ensure the `zip` command is available.", { stderr: zip.stderr });
+writeFileSync(zipPath,zipFiles(["manifest.json", "site-policy.js", "bridge-main.js", "LICENSE", "UPSTREAM.md"].map(name=>({name,bytes:readFileSync(resolve(extensionDir,name))}))));
 
 const bytes = readFileSync(zipPath);
 const sha256 = createHash("sha256").update(bytes).digest("hex");

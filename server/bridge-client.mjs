@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import "../extension/site-policy.js";
 const policy=globalThis.RHCanvasSitePolicy;
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -10,6 +10,8 @@ export class BridgeClient {
     }
     this.base = url.origin;
     this.canvasUrl = null;
+    this.sessionId = null;
+    this.clientId = null;
   }
   async request(path, body, timeoutMs = 8000) {
     const response = await fetch(this.base + path, {
@@ -34,7 +36,14 @@ export class BridgeClient {
       if(attempt===14)throw new Error('CANVAS_NOT_CONNECTED');
       await pause(400);
     }
-    const result = await this.request("/access", { canvasUrl, allowWrites });
+    let result;
+    try { result = await this.request("/sessions", { canvasUrl, allowWrites, ...(this.sessionId ? {sessionId:this.sessionId} : {}) }); }
+    catch(error) {
+      if(!String(error.message).startsWith('SESSION_EXPIRED')) throw error;
+      this.sessionId=null;
+      result=await this.request('/sessions',{canvasUrl,allowWrites});
+    }
+    this.sessionId = result.sessionId;
     this.canvasUrl = new URL(canvasUrl).origin + new URL(canvasUrl).pathname;
     await this.target();
     return { ...result, canvasUrl: this.canvasUrl };
@@ -44,15 +53,17 @@ export class BridgeClient {
     const expected = policy.parseCanvas(this.canvasUrl);
     for (let attempt = 0; attempt < 15; attempt++) {
       const clients = await this.request("/clients");
-      const match = clients.find(c => policy.parseCanvas(c.href)?.key === expected.key && c.runtimeFreshness === "fresh");
-      if (match) return { clientId: match.clientId, canvasId: expected.canvasId, canvasOrigin: expected.origin };
+      const candidates = clients.filter(c => policy.parseCanvas(c.href)?.key === expected.key && c.runtimeFreshness === "fresh");
+      const match = candidates.find(c=>c.clientId===this.clientId) || candidates[0];
+      if (match) { this.clientId = match.clientId; return { clientId: match.clientId, canvasId: expected.canvasId, canvasOrigin: expected.origin }; }
       await pause(400);
     }
     throw new Error("CANVAS_NOT_CONNECTED: open or refresh the selected canvas in Chrome");
   }
+  wireId(id) { return this.sessionId && !/^rh-[a-f0-9]{64}$/.test(id) ? 'rh-'+createHash('sha256').update(this.sessionId+':'+id).digest('hex') : id; }
   async command(type, args = {}, { id = randomUUID(), timeoutMs = 45000 } = {}) {
     const target = await this.target();
-    const command = { ...args, ...target, type, id, compactMutation: true };
+    const command = { ...args, ...target, type, id: this.wireId(id), sessionId:this.sessionId, compactMutation: true };
     // Deliberately send once. A timeout is not evidence that a paid submission failed.
     const accepted = await this.request("/command", command);
     const until = Date.now() + timeoutMs;

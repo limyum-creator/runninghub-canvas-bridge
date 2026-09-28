@@ -15,7 +15,7 @@
   window.__RUNNINGHUB_CANVAS_BRIDGE_INSTALLED__ = true;
   window.__RUNNINGHUB_CANVAS_BRIDGE_VERSION__ = RUNTIME_VERSION;
 
-  const BRIDGE = "http://127.0.0.1:18765";
+  const BRIDGE = window.__RUNNINGHUB_CANVAS_BRIDGE_URL__ || "http://127.0.0.1:18765";
   const CLIENT_ID = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   let seq = 0;
   let pollTimer;
@@ -197,11 +197,13 @@
     return value;
   };
 
+  let activeCommandAccess = null;
+  let activeCommand = null;
   const withCanvasYjs = async (fn, { write = false } = {}) => {
     const site = SITE_POLICY.parseCanvas(location.href);
     if (!site) throw new Error("Unsupported canvas URL");
     if (write) {
-      const denied = SITE_POLICY.authorizeCommand({ type: "canvas.updateNode" }, ACCESS, site);
+      const denied = SITE_POLICY.authorizeCommand({ type: "canvas.updateNode" }, activeCommandAccess || ACCESS, site);
       if (denied) throw new Error(denied);
     }
     const { Y, WebsocketProvider, decoding, messageYjsSyncStep1 } = await loadYjs();
@@ -438,9 +440,15 @@
     return rollbackId;
   };
 
+  const FEATURES = globalThis.RHCanvasFeatures;
   const withCanvasMutation = async (command, mutate) =>
     withCanvasYjs(async (ctx) => {
       const before = canvasSnapshotFromContext(ctx);
+      const expected = command.expectedRevisions || activeCommand?.expectedRevisions || {};
+      await FEATURES.checkRevisions(before,expected);
+      for(const id of Object.keys(expected)) {
+        if(FEATURES.canonical(FEATURES.nodeState(before,id)) !== FEATURES.canonical(FEATURES.nodeState(canvasSnapshotFromContext(ctx),id))) throw new Error(`EDIT_CONFLICT: reread node ${id}`);
+      }
       if (command.dryRun) {
         const preview = makePreviewContext(ctx.Y, before);
         let value;
@@ -1067,7 +1075,7 @@
       const currentNodes = yArrayToJson(nodes);
       const currentEdges = yArrayToJson(edges);
       const needle = normalizeQuery(text || q || query);
-      const imageNodes = currentNodes.filter((node) => node?.type === "rh-image");
+      const imageNodes = currentNodes.filter((node) => imageUrlsFromNode(node).length > 0);
       const scored = imageNodes
         .map((node) => {
           const upstream = directUpstreamNodes({ targetId: node.id, nodes: currentNodes, edges: currentEdges });
@@ -1111,7 +1119,7 @@
       const currentEdges = yArrayToJson(edges);
       const node = currentNodes.find((item) => item?.id === targetId);
       if (!node) throw new Error(`Node not found: ${targetId}`);
-      if (node.type !== "rh-image") throw new Error(`Expected rh-image node, got ${node.type || "unknown"}`);
+      if (!imageUrlsFromNode(node).length) throw new Error(`Expected rh-image node, got ${node.type || "unknown"}`);
       return {
         ok: true,
         canvasId,
@@ -1127,9 +1135,10 @@
   const getElement = async ({ elementId, id = elementId } = {}) => {
     id = elementId || id;
     if (!id) throw new Error("id is required");
-    return withCanvasYjs(({ nodes, edges, canvasId }) => {
-      const node = yArrayToJson(nodes).find((item) => item?.id === id);
-      if (node) return { canvasId, kind: "node", element: node };
+    return withCanvasYjs(async ({ nodes, edges, canvasId }) => {
+      const snapshot={nodes:yArrayToJson(nodes),edges:yArrayToJson(edges)};
+      const node = snapshot.nodes.find((item) => item?.id === id);
+      if (node) return { canvasId, kind: "node", element: node, revision:await FEATURES.revision(snapshot,id) };
       const edge = yArrayToJson(edges).find((item) => item?.id === id);
       if (edge) return { canvasId, kind: "edge", element: edge };
       throw new Error(`Element not found: ${id}`);
@@ -1257,7 +1266,7 @@
       return true;
     });
     return {
-      source: "observed-from-current-RunningHub-ui",
+      source: "legacy-static-presets; use canvas.listModels for live schema",
       aliases: MODEL_ALIASES,
       options: Object.fromEntries(entries.length ? entries : Object.entries(MODEL_OPTIONS))
     };
@@ -1348,22 +1357,7 @@
 
   const firstPresentString = (...values) => values.find((value) => typeof value === "string" && value.trim())?.trim() || "";
 
-  const imageUrlsFromNode = (node) => {
-    const data = node?.data || {};
-    const urls = [];
-    for (const item of data.output || []) {
-      if (item?.success === false) continue;
-      if (item?.mediaCategory && item.mediaCategory !== "image") continue;
-      if (item?.url) urls.push(item.url);
-    }
-    for (const url of data.sourceObjects || []) {
-      if (typeof url === "string") urls.push(url);
-    }
-    for (const url of data.params?.imageUrls || []) {
-      if (typeof url === "string") urls.push(url);
-    }
-    return [...new Set(urls.filter(Boolean))];
-  };
+  const imageUrlsFromNode = node => FEATURES.mediaUrls(node,'image');
 
   const textFromNode = (node) => firstPresentString(node?.data?.text, node?.data?.params?.prompt);
 
@@ -1416,7 +1410,7 @@
       : Array.isArray(params.imageUrls) ? params.imageUrls.filter(Boolean) : [];
     const upstream = directUpstreamNodes({ targetId, nodes, edges });
     const upstreamImages = upstream
-      .filter(({ node }) => node?.type === "rh-image")
+      .filter(({ node }) => imageUrlsFromNode(node).length > 0)
       .map(({ node, edge }) => ({ nodeId: node.id, edgeId: edge.id, urls: imageUrlsFromNode(node) }));
     const upstreamImageUrls = new Set(upstreamImages.flatMap((item) => item.urls));
     const missingUpstreamUrls = imageUrls.filter((url) => !upstreamImageUrls.has(url));
@@ -1429,7 +1423,7 @@
         errors.push(`Expected multimodal video modelCode, got ${target.data?.modelCode || "empty"}`);
       }
       if (!nativeH3 && !imageUrls.length) errors.push("params.imageUrls is empty");
-      if (!upstreamImages.length) errors.push("No direct upstream rh-image edges");
+      if (!upstreamImages.length) errors.push("No direct upstream image outputs");
       if (missingUpstreamUrls.length) errors.push(`imageUrls without matching direct upstream image output: ${missingUpstreamUrls.join(", ")}`);
       if (!nativeH3 && (!Array.isArray(params.conversionSlots) || !params.conversionSlots.length)) errors.push("params.conversionSlots is empty");
     }
@@ -1460,7 +1454,7 @@
     const params = target.data?.params || {};
     const prompt = firstPresentString(target.data?.text, params.prompt);
     const upstream = directUpstreamNodes({ targetId, nodes, edges });
-    const upstreamImages = upstream.filter(({ node }) => node?.type === "rh-image").map(({ node, edge }) => ({ nodeId: node.id, edgeId: edge.id, urls: imageUrlsFromNode(node) }));
+    const upstreamImages = upstream.filter(({ node }) => imageUrlsFromNode(node).length > 0).map(({ node, edge }) => ({ nodeId: node.id, edgeId: edge.id, urls: imageUrlsFromNode(node) }));
     const upstreamTexts = upstream.filter(({ node }) => node?.type === "rh-text").map(({ node, edge }) => ({ nodeId: node.id, edgeId: edge.id, chars: textFromNode(node).length }));
     const imageUrls = Array.isArray(params.imageUrls) ? params.imageUrls.filter(Boolean) : [];
 
@@ -1536,7 +1530,7 @@
 
       const requestedReferenceNodes = Array.isArray(referenceNodeIds)
         ? referenceNodeIds.map((refId) => nodeById.get(refId)).filter(Boolean)
-        : direct.filter(({ node }) => node?.type === "rh-image").map(({ node }) => node);
+        : direct.filter(({ node }) => imageUrlsFromNode(node).length > 0).map(({ node }) => node);
       const referenceEntries = requestedReferenceNodes
         .map((node) => ({ node, url: imageUrlsFromNode(node)[0] }))
         .filter((item) => item.url);
@@ -2796,14 +2790,31 @@
       return { deletedNodes, deletedEdges };
     });
 
+  const featureTools = FEATURES.create({
+    api: async (endpoint,body) => {
+      const response=await fetch(new URL(endpoint,SITE_POLICY.parseCanvas(location.href).apiOrigin),{method:'POST',headers:authHeaders(),credentials:'include',body:JSON.stringify(body)});
+      if(!response.ok) throw new Error(`PLATFORM_API_ERROR: ${response.status}`);
+      const payload=await response.json();
+      if(payload.code!==undefined && Number(payload.code)!==0) throw new Error(`PLATFORM_API_ERROR: ${payload.code}`);
+      return payload.data ?? payload;
+    },
+    withMutation:withCanvasMutation,
+    readSnapshot:()=>withCanvasYjs(ctx=>canvasSnapshotFromContext(ctx)),toYValue,getTitle:getNodeTitle
+  });
+
   const executeCommand = async (command) => {
     if (!command || !command.id) return;
     let result;
     try {
       if (command.expiresAt && command.expiresAt < Date.now()) throw new Error("COMMAND_EXPIRED");
-      const denied = SITE_POLICY.authorizeCommand(command, ACCESS, SITE_POLICY.parseCanvas(location.href));
+      activeCommand = command;
+      activeCommandAccess = command.access ? {...command.access, generationEnabled:ACCESS.generationEnabled} : ACCESS;
+      const denied = SITE_POLICY.authorizeCommand(command, activeCommandAccess, SITE_POLICY.parseCanvas(location.href));
       if (denied) throw new Error(denied);
-      if (command.type === "graph.snapshot") {
+      const featureName=command.type?.replace(/^canvas\./,'');
+      if (Object.hasOwn(featureTools,featureName)) {
+        result = await featureTools[featureName](command);
+      } else if (command.type === "graph.snapshot") {
         result = summarizeGraph();
       } else if (command.type === "canvas.exportWorkflow") {
         if (typeof window._exportWorkflow !== "function") throw new Error("window._exportWorkflow is not available");
@@ -2925,6 +2936,9 @@
         errorCode: errorCodeFromError(error),
         error: error && error.stack ? error.stack : String(error)
       });
+    } finally {
+      activeCommandAccess = null;
+      activeCommand = null;
     }
   };
 

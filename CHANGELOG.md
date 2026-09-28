@@ -1,3 +1,12 @@
+## 0.5.0
+
+- Add platform asset browsing/search and URL-based canvas reuse.
+- Recognize generated media outputs and bind references with live model fields.
+- Discover current model configuration instead of relying on static presets.
+- Isolate MCP canvas scopes; serialize canvas mutations and add optimistic batch conflict checks.
+- Add Windows per-user background startup, media-tool discovery and portable ZIP packaging.
+- Add Linux/macOS/Windows CI, including Windows Unicode-path launcher and service lifecycle checks.
+
 # Changes
 
 ## 0.4.0 — 2026-09-27

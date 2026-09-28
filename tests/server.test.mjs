@@ -66,4 +66,24 @@ test("local HTTP bridge restricts origins, commands, and stale/incorrect client 
   const result = { href, clientId: "fixture-client", kind: "command.result", commandId: queued.id, ok: true, result: { counts: { nodes: 2 } } };
   assert.equal((await post("/events", result, { Origin: origin })).status, 200);
   assert.equal((await (await fetch(base + "/result?id=" + queued.id)).json()).result.counts.nodes, 2);
+  const session=async allowWrites=>(await (await post('/sessions',{canvasUrl:href,allowWrites})).json()).sessionId;
+  const writer=await session(true),reader=await session(false);
+  assert.ok(writer);assert.notEqual(writer,reader);
+  assert.equal((await (await fetch(base+'/runtime-version')).json()).version,runtime.version,'scope changes must not reload every page');
+  const edit={id:'edit-one',type:'canvas.updateNodeParams',clientId:'fixture-client',sessionId:writer};
+  assert.equal((await post('/command',edit)).status,200);
+  assert.equal((await (await post('/command',{...edit,id:'denied',sessionId:reader})).json()).errorCode,'READ_ONLY');
+  // Legacy access changes cannot revoke a selected session's writes.
+  await post('/access',{canvasUrl:href,allowWrites:false});
+  await post('/command',{...edit,id:'edit-two'});
+  const poll=async()=>(await (await fetch(base+'/commands?clientId=fixture-client&href='+encodeURIComponent(href),{headers:{Origin:origin}})).json());
+  const first=await poll();assert.equal(first.length,1);assert.equal(first[0].id,'edit-one');assert.equal(first[0].access.allowWrites,true);
+  assert.equal((await poll()).length,0);
+  assert.equal((await post('/events',{...result,commandId:'edit-one',clientId:'intruder'},{Origin:origin})).status,409);
+  assert.equal((await poll()).length,0);
+  await post('/events',{...result,commandId:'edit-one'},{Origin:origin});
+  assert.equal((await poll())[0].id,'edit-two');
+  await post('/events',{...result,commandId:'edit-two'},{Origin:origin});
+  assert.equal((await (await post('/command',{...edit,id:'expired-session',sessionId:'missing'})).json()).errorCode,'SESSION_EXPIRED');
+
 });

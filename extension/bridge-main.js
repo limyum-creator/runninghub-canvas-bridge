@@ -3,7 +3,7 @@
   if (!globalThis.RHCanvasSitePolicy?.parseCanvas(location.href)) return;
   const BRIDGE = "http://127.0.0.1:18765";
   const LOADER_KEY = "__RUNNINGHUB_CANVAS_BRIDGE_LOADER__";
-  const LOADER_VERSION = "0.4.0";
+  const LOADER_VERSION = "0.5.0";
   const PROTOCOL_VERSION = "1";
 
   if (window[LOADER_KEY]?.loading) return;
