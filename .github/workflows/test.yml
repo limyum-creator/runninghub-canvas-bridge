@@ -27,7 +27,18 @@ jobs:
         run: brew install ffmpeg
       - name: Install ffmpeg (Windows)
         if: runner.os == 'Windows'
-        run: choco install ffmpeg -y --no-progress
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'ffmpeg installation failed' }
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User') + ';' + $env:Path
+          $probe = (Get-Command ffprobe.exe -ErrorAction SilentlyContinue).Source
+          if (!$probe) {
+            $probe = (Get-ChildItem -Path "$env:ChocolateyInstall/lib/ffmpeg", 'C:/tools' -Filter ffprobe.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+          if (!$probe) { throw 'ffprobe.exe not found after install' }
+          "RH_FFPROBE=$probe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $probe -version
       - run: npm run check
       - name: Regression tests
         run: node --test --test-reporter=spec --test-timeout=60000 tests/*.test.mjs
