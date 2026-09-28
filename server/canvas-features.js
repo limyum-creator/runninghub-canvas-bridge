@@ -101,8 +101,12 @@
             const field=fields.get(reference.parameter);
             if (!field) throw new Error(`REFERENCE_PARAMETER_UNKNOWN: ${reference.parameter}`);
             const type=String(field.type || '').toLowerCase();
-            if (!type.includes(reference.kind) && !new RegExp(reference.kind,'i').test(field.name)) throw new Error(`REFERENCE_PARAMETER_KIND_MISMATCH: ${reference.parameter}`);
-            if(seen.has(field.name)) throw new Error('DUPLICATE_REFERENCE_PARAMETER');
+            if (!(type===reference.kind || (type.includes(reference.kind) && /url|upload/.test(type)))) throw new Error(`REFERENCE_PARAMETER_KIND_MISMATCH: ${reference.parameter}`);
+            const arrayField=String(field.dataType).toLowerCase()==='array' || /array|multiple/.test(type) || Array.isArray(field.default);
+            if(reference.array && field.dataType==='string') throw new Error('REFERENCE_PARAMETER_REQUIRES_STRING');
+            const asArray=arrayField || reference.array===true;
+            if(seen.has(field.name) && !asArray) throw new Error('DUPLICATE_REFERENCE_PARAMETER');
+            const previous=seen.has(field.name) ? params[field.name] : [];
             seen.add(field.name);
             const source=all.find(n=>n.id===reference.sourceNodeId);
             if(!source || source.id===node.id) throw new Error('REFERENCE_SOURCE_INVALID');
@@ -110,7 +114,7 @@
             const url=reference.url || (urls.length===1 ? urls[0] : null);
             if(!url || !urls.includes(url)) throw new Error(`REFERENCE_OUTPUT_AMBIGUOUS: ${reference.sourceNodeId}; specify one inspected output URL`);
             // Array parameters require an explicit array mode; scalar fields preserve platform types.
-            params[field.name]=reference.array ? [url] : url;
+            params[field.name]=asArray ? [...new Set([...previous,url])] : url;
             sources.add(source.id);
           }
           const next={...node,data:{...node.data,params}};

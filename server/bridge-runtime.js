@@ -523,6 +523,13 @@
   };
 
   const COMMAND_CAPABILITIES = [
+    {type:'canvas.listModels',description:'Read current platform model catalog.'},
+    {type:'canvas.modelSchema',description:'Read live parameter options and constraints for a model.'},
+    {type:'canvas.searchAssets',description:'Search or browse the platform asset drawer.'},
+    {type:'canvas.addAsset',description:'Reuse a searched media asset without uploading.'},
+    {type:'canvas.inspectReferences',description:'Inspect actual image, video and audio outputs.'},
+    {type:'canvas.bindReferences',description:'Bind native reference slots and edges in one edit.'},
+    {type:'canvas.batchUpdate',description:'Apply a revision-checked batch of node edits.'},
     { type: "canvas.cloneTemplate", description: "Clone an empty configured model template without inputs or results." },
     {
       type: "graph.snapshot",
