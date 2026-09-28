@@ -86,4 +86,19 @@ test("local HTTP bridge restricts origins, commands, and stale/incorrect client 
   await post('/events',{...result,commandId:'edit-two'},{Origin:origin});
   assert.equal((await (await post('/command',{...edit,id:'expired-session',sessionId:'missing'})).json()).errorCode,'SESSION_EXPIRED');
 
+  // Two tabs on the same canvas must share the mutation lock.
+  await post('/events',{href,kind:'bridge.installed',clientId:'second-tab',runtimeVersion:runtime.version},{Origin:origin});
+  await post('/command',{...edit,id:'tab-one'});
+  await post('/command',{...edit,id:'tab-two',clientId:'second-tab'});
+  assert.equal((await poll())[0].id,'tab-one');
+  const secondPoll=async()=>(await (await fetch(base+'/commands?clientId=second-tab&href='+encodeURIComponent(href),{headers:{Origin:origin}})).json());
+  assert.equal((await secondPoll()).length,0);
+  await post('/events',{...result,commandId:'tab-one'},{Origin:origin});
+  assert.equal((await secondPoll())[0].id,'tab-two');
+  await post('/events',{...result,clientId:'second-tab',commandId:'tab-two'},{Origin:origin});
+  await post('/command',{...edit,id:'revoked-before-dispatch'});
+  await post('/sessions',{sessionId:writer,canvasUrl:href,allowWrites:false});
+  assert.equal((await poll()).length,0);
+  assert.equal((await (await fetch(base+'/result?id=revoked-before-dispatch')).json()).errorCode,'READ_ONLY');
+
 });

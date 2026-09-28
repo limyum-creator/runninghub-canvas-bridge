@@ -29,7 +29,9 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install ffmpeg -y --no-progress
       - run: npm run check
-      - run: npm test
+      - name: Regression tests
+        run: node --test --test-reporter=spec --test-timeout=60000 tests/*.test.mjs
+        timeout-minutes: 3
       - run: npm run build
       - run: npm run release:package
       - run: npm pack --dry-run

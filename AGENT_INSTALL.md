@@ -1,6 +1,6 @@
 # Agent installation
 
-Modified 2026-09-27: international canvas and stdio MCP, version 0.4.0.
+Modified 2026-09-28: international canvas, stdio MCP and Windows support, version 0.5.0.
 
 1. Ensure ffprobe is available (or set `RH_FFPROBE`). From this source checkout run `npm ci` and `npm run build`. Source and release artifacts are available at https://github.com/limyum-creator/runninghub-canvas-bridge. No npm registry publication is required.
 2. Start `RH_BRIDGE_ALLOW_GENERATION=1 npm start`, or on macOS install the background service with `RH_BRIDGE_ALLOW_GENERATION=1 npm run service:install`. Do not start both.

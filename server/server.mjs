@@ -395,6 +395,12 @@ const server = http.createServer(async (req, res) => {
           commandResults.set(command.id,{ok:false,errorCode:'CANVAS_MISMATCH',commandId:command.id});
           return false;
         }
+        const currentScope=accessFor(command);
+        const denial=!currentScope ? 'SESSION_EXPIRED' : command.sessionId && (currentScope.canvasId!==command.canvasId || currentScope.origin!==command.canvasOrigin) ? 'SESSION_CANVAS_MISMATCH' : SITE_POLICY.authorizeCommand(command,currentScope,SITE_POLICY.parseCanvas(href));
+        if(denial) {
+          record.state='rejected';commandResults.set(command.id,{ok:false,errorCode:denial,commandId:command.id});return false;
+        }
+        command.access={...currentScope,generationEnabled:ACCESS.generationEnabled};
         const mode = SITE_POLICY.commandMode(command);
         if (mode === 'edit' || mode === 'generate') {
           if (canvasMutations.has(record.canvasKey)) {
@@ -423,6 +429,7 @@ const server = http.createServer(async (req, res) => {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         events: events.length,
         access: ACCESS,
+        instanceId: process.env.RH_BRIDGE_INSTANCE_ID || null,
         pendingClients: pendingCommands.size,
         activeMutations: canvasMutations.size,
         sessions: sessions.size
