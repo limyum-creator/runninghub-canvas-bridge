@@ -106,3 +106,5 @@ Windows 10/11 使用 Node.js 20.19+、Chrome 或 Edge，以及 PATH 中的 `ffpr
 后台服务使用当前用户的登录启动目录，无需管理员权限。支持 `service:start`、`service:stop`、`service:restart`、`service:status`、`service:uninstall`。运行日志位于用户主目录 `.runninghub-canvas-bridge/logs`，卸载保留归档与配置。企业策略禁用 Windows Script Host 时可用 `npm start` 前台运行。
 
 PowerShell 如需开启生成，在安装服务前设置 `$env:RH_BRIDGE_ALLOW_GENERATION="1"`。可选光栈归档需设置 `$env:RH_LUMEN_MCP_CONFIG` 指向光栈导出的 MCP 配置文件；未配置不影响画布编辑和生成。文件路径必须属于运行 MCP/桥接的同一台电脑。
+
+验证范围：国际站 Chrome 测试画布已验证资产复用、图片/音频参考写入、实时 H3 参数和冲突拒绝，未提交生成。Windows CI 覆盖 MCP、画布协议模拟、媒体归档、中文路径、后台服务安装/重启/卸载及 ZIP 解包；Windows 浏览器登录后的现场操作尚未单独验证。

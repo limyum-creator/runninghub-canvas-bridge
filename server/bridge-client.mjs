@@ -25,7 +25,8 @@ export class BridgeClient {
   }
   async status() {
     const [health, clients] = await Promise.all([this.request("/health"), this.request("/clients")]);
-    return { ...health, selectedCanvas: this.canvasUrl, clients: clients.map(c => ({ clientId: c.clientId, canvasUrl: c.href, title: c.title, runtimeFreshness: c.runtimeFreshness })) };
+    const session = this.sessionId ? await this.request('/sessions?id='+encodeURIComponent(this.sessionId)) : null;
+    return { ...health, legacyAccess:health.access, access:session?.access || null, sessionId:this.sessionId, sessionState:!this.sessionId?'unselected':session?.access?'selected':'expired', selectedCanvas: this.canvasUrl, clients: clients.map(c => ({ clientId: c.clientId, canvasUrl: c.href, title: c.title, runtimeFreshness: c.runtimeFreshness })) };
   }
   async select(canvasUrl, allowWrites) {
     const canvas = policy.parseCanvas(canvasUrl);

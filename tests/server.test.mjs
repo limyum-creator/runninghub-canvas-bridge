@@ -69,6 +69,8 @@ test("local HTTP bridge restricts origins, commands, and stale/incorrect client 
   const session=async allowWrites=>(await (await post('/sessions',{canvasUrl:href,allowWrites})).json()).sessionId;
   const writer=await session(true),reader=await session(false);
   assert.ok(writer);assert.notEqual(writer,reader);
+  assert.equal((await (await fetch(base+'/sessions?id='+writer)).json()).access.allowWrites,true);
+  assert.equal((await (await fetch(base+'/sessions?id='+reader)).json()).access.allowWrites,false);
   assert.equal((await (await fetch(base+'/runtime-version')).json()).version,runtime.version,'scope changes must not reload every page');
   const edit={id:'edit-one',type:'canvas.updateNodeParams',clientId:'fixture-client',sessionId:writer};
   assert.equal((await post('/command',edit)).status,200);

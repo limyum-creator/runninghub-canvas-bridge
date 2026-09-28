@@ -193,6 +193,10 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, runtime);
     }
 
+    if (req.method === "GET" && url.pathname === "/sessions") {
+      const sessionId=url.searchParams.get('id');
+      return json(res,200,{sessionId,access:sessions.get(sessionId) || null});
+    }
     if (req.method === "POST" && url.pathname === "/sessions") {
       const input = JSON.parse(await readBody(req));
       const canvas = SITE_POLICY.parseCanvas(input.canvasUrl);
