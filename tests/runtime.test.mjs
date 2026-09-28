@@ -235,7 +235,7 @@ test('batch edit rejects stale revisions without partially changing nodes',async
 test('asset reuse creates once, preserves kind and rejects expired/unknown selection',async()=>{
   const f=fixture({allowWrites:true,apiData:{'/canvas/asset/user/folder/item/search':{records:[{id:'asset-1',nodeType:'AUDIO',url:'https://example.test/voice.wav',itemName:'Voice'}],pages:1}}});
   const run=async(id,type,args={})=>{await f.sandbox.testHooks.executeCommand({id,type,...args});return f.events.find(e=>e.commandId===id);};
-  const search=await run('search','canvas.searchAssets');assert.equal(search.ok,true);
+  const search=await run('search','canvas.searchAssets',{keyword:'Voice'});assert.equal(search.ok,true);
   const token=search.result.records[0].assetToken;
   const added=await run('add','canvas.addAsset',{assetToken:token,x:10,y:20});assert.equal(added.ok,true,added.error);assert.equal(added.result.result.mediaKind,'audio');
   const reused=await run('again','canvas.addAsset',{assetToken:token,x:30,y:40});assert.equal(reused.result.result.reused,true);

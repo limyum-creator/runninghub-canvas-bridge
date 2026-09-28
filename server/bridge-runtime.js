@@ -2795,7 +2795,7 @@
       const response=await fetch(new URL(endpoint,SITE_POLICY.parseCanvas(location.href).apiOrigin),{method:'POST',headers:authHeaders(),credentials:'include',body:JSON.stringify(body)});
       if(!response.ok) throw new Error(`PLATFORM_API_ERROR: ${response.status}`);
       const payload=await response.json();
-      if(payload.code!==undefined && Number(payload.code)!==0) throw new Error(`PLATFORM_API_ERROR: ${payload.code}`);
+      if(payload.code!==undefined && Number(payload.code)!==0) throw new Error(`PLATFORM_API_ERROR: ${payload.code}: ${String(payload.msg || payload.message || "").slice(0,250)}`);
       return payload.data ?? payload;
     },
     withMutation:withCanvasMutation,

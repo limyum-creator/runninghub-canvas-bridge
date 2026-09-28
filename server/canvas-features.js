@@ -49,6 +49,7 @@
       const searchAssets = async ({view='search',keyword='',page=1,size=30,groupId,code,nodeTypes}={}) => {
         const endpoints={search:'folder/item/search',groups:'group/list',items:'group/item/list',folders:'folder/first-level/list',children:'folder/second-level/list',folderItems:'folder/second-level/item/list'};
         if (!endpoints[view] || (['items','children','folderItems'].includes(view) && !groupId)) throw new Error('ASSET_QUERY_INVALID');
+        if(view==='search' && !keyword.trim()) throw new Error('ASSET_KEYWORD_REQUIRED: use groups or folders to browse without a keyword');
         const body={keyword,page,size,...(code?{code}:{}),...(groupId?{[view==='children'?'parentGroupId':'groupId']:groupId}:{}),...(nodeTypes?.length?{nodeTypes}:{})};
         const data=await api('/canvas/asset/user/'+endpoints[view],body);
         if (!Array.isArray(data?.records)) throw new Error('ASSET_RESPONSE_UNSUPPORTED');

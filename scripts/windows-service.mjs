@@ -35,7 +35,7 @@ export async function windowsService(action,{root=resolve(dirname(fileURLToPath(
     const current=await status();if(current.ok)return current;
     if(!await exists(launcher))throw new Error('SERVICE_NOT_INSTALLED: run service:install first');
     await unlink(stop).catch(()=>{});
-    const child=spawnSync('wscript.exe',[launcher],{windowsHide:true,encoding:'utf8'});
+    const child=spawnSync('wscript.exe',[launcher],{windowsHide:true,stdio:'ignore',timeout:15000});
     if(child.error || child.status!==0)throw new Error('Cannot start Windows Script Host: '+(child.error?.message || child.stderr));
     for(let i=0;i<40;i++){const state=await status();if(state.ok)return state;await delay(250);}
     throw new Error('SERVICE_START_TIMEOUT: inspect '+join(dir,'logs'));

@@ -9,7 +9,7 @@ const tool = args.shift() || "rh_status";
 const option = name => args.includes(name) ? args[args.indexOf(name) + 1] : undefined;
 const input = option("--input-file") ? await readFile(option("--input-file"), "utf8") : option("--json") || "{}";
 const client = new Client({ name: "runninghub-mcp-client", version: "0.3.0" });
-const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../server/mcp.mjs", import.meta.url))], stderr: "inherit" });
+const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../server/mcp.mjs", import.meta.url))], stderr: "inherit", env: process.env });
 try {
   await client.connect(transport);
   if (tool === "list") {
