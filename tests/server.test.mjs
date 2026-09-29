@@ -104,3 +104,27 @@ test("local HTTP bridge restricts origins, commands, and stale/incorrect client 
   assert.equal((await (await fetch(base+'/result?id=revoked-before-dispatch')).json()).errorCode,'READ_ONLY');
 
 });
+
+test('HTTP command receipts and duplicate IDs survive service restart without replaying unknown commands',async t=>{
+  const reservation=createServer();await new Promise(r=>reservation.listen(0,'127.0.0.1',r));const port=reservation.address().port;await new Promise(r=>reservation.close(r));
+  const root=await mkdtemp(join(tmpdir(),'rh-restart-'));let child;
+  const stop=async()=>{if(child && child.exitCode===null){const exit=once(child,'exit');child.kill();await exit;}};
+  t.after(async()=>{await stop();await rm(root,{recursive:true,force:true});});
+  const start=async()=>{child=spawn(process.execPath,['server/server.mjs'],{cwd:new URL('..',import.meta.url),env:{...process.env,RH_ARCHIVE_DIR:root,RH_BRIDGE_PORT:String(port),RH_BRIDGE_ALLOW_WRITES:'0',RH_BRIDGE_ALLOW_GENERATION:'0',RH_BRIDGE_ACCESS_FILE:''},stdio:['ignore','pipe','pipe']});await Promise.race([once(child.stdout,'data'),once(child,'exit').then(()=>{throw new Error('Bridge failed to start');})]);};
+  await start();const base=`http://127.0.0.1:${port}`,href='https://www.runninghub.ai/project/canvas/restart';
+  const post=async(path,value)=>(await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(value)})).json();
+  const get=async path=>(await fetch(base+path)).json();
+  const register=async()=>{await post('/events',{kind:'bridge.installed',clientId:'restart-client',href});return (await post('/sessions',{canvasUrl:href,allowWrites:true})).sessionId;};
+  let sessionId=await register();
+  const command={id:'persisted-edit',type:'canvas.updateNodeParams',clientId:'restart-client',nodeId:'n',params:{prompt:'test'}};
+  await post('/command',{...command,sessionId});
+  assert.equal((await get('/commands?clientId=restart-client&href='+encodeURIComponent(href))).length,1);
+  await post('/command',{...command,id:'never-sent',sessionId});
+  await stop();await start();
+  assert.equal((await get('/result?id=persisted-edit')).errorCode,'COMMAND_OUTCOME_UNKNOWN');
+  assert.equal((await get('/result?id=never-sent')).errorCode,'COMMAND_NOT_DISPATCHED');
+  sessionId=await register();
+  const duplicate=await post('/command',{...command,sessionId});assert.equal(duplicate.duplicate,true);assert.equal(duplicate.state,'unknown');
+  assert.equal((await get('/commands?clientId=restart-client&href='+encodeURIComponent(href))).length,0);
+  assert.equal((await post('/command',{...command,params:{prompt:'different'},sessionId})).errorCode,'REQUEST_ID_CONFLICT');
+});

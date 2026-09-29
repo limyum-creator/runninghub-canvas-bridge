@@ -245,3 +245,82 @@ test('asset reuse creates once, preserves kind and rejects expired/unknown selec
   assert.equal(f.remoteDoc.getMap('canvas').get('canvas_content').get('nodes').length,1);
   assert.equal((await run('bad','canvas.addAsset',{assetToken:'unknown'})).ok,false);f.remoteDoc.destroy();
 });
+
+function workflowFixture() {
+  const config=[
+    {paramName:'prompt',paramDataType:'string',required:true},
+    {paramName:'duration',paramDataType:'string',min:4,max:15},
+    {paramName:'resolution',paramDataType:'string',optionValue:[{value:'480p'},{value:'768p'}]},
+    ...['refImage1','refImage2'].map(paramName=>({paramName,type:'image',paramDataType:'string'}))
+  ];
+  const f=fixture({allowWrites:true,generationEnabled:true,apiData:{'/canvas/model/list':[{type:'MULTIMODAL_VIDEO',modelList:[{modelCode:'model',config}]}]}});
+  let seq=0;
+  f.run=async(type,args={})=>{const id='workflow-'+seq++;await f.sandbox.testHooks.executeCommand({id,type,...args});return f.events.find(e=>e.commandId===id);};
+  f.nodes=()=>f.remoteDoc.getMap('canvas').get('canvas_content').get('nodes').toJSON();
+  f.edges=()=>f.remoteDoc.getMap('canvas').get('canvas_content').get('edges').toJSON();
+  f.seed=async()=>{
+    for(const id of ['a','b']) await f.run('canvas.createNode',{config:{id,type:'rh-image',data:{sourceObjects:[`https://example.test/${id}.png`]}}});
+    await f.run('canvas.createNode',{config:{id:'blank',type:'rh-video',data:{modelCode:'model',subType:'multimodal-video',params:{duration:'6',resolution:'480p'}}}});
+  };
+  return f;
+}
+
+test('replace references removes old media slots and edges but preserves text/control connections',async t=>{
+  const f=workflowFixture();t.after(()=>f.remoteDoc.destroy());await f.seed();
+  await f.run('canvas.createTextNode',{config:{id:'text',text:'source words'}});
+  await f.run('canvas.connectNodes',{source:'text',target:'blank'});
+  await f.run('canvas.bindReferences',{nodeId:'blank',references:[{sourceNodeId:'a',kind:'image',parameter:'refImage1'},{sourceNodeId:'b',kind:'image',parameter:'refImage2'}]});
+  const result=await f.run('canvas.bindReferences',{nodeId:'blank',mode:'replace',references:[{sourceNodeId:'b',kind:'image',parameter:'refImage1'}]});
+  assert.equal(result.ok,true,result.error);
+  const params=f.nodes().find(n=>n.id==='blank').data.params;
+  assert.equal(params.refImage1,'https://example.test/b.png');assert.equal(params.refImage2,undefined);assert.equal(params.duration,'6');
+  assert.deepEqual(f.edges().map(e=>e.source).sort(),['b','text']);
+  const before=JSON.stringify(f.nodes());
+  assert.equal((await f.run('canvas.bindReferences',{nodeId:'blank',mode:'replace',dryRun:true,references:[]})).ok,true);
+  assert.equal(JSON.stringify(f.nodes()),before);
+  await f.run('canvas.bindReferences',{nodeId:'blank',mode:'replace',references:[]});
+  assert.deepEqual(f.edges().map(e=>e.source),['text']);
+});
+
+test('live parameter validation refuses range/type/enum/unknown keys and preflight pins exact text and graph',async t=>{
+  const f=workflowFixture();t.after(()=>f.remoteDoc.destroy());await f.seed();
+  for(const params of [{duration:'99'},{duration:6},{resolution:'invalid'},{invented:true}]) {
+    const event=await f.run('canvas.updateNodeParams',{nodeId:'blank',params,validateParams:true});
+    assert.equal(event.ok,false);assert.match(event.error,/PARAMETER_INVALID/);
+  }
+  await f.run('canvas.updateNodeParams',{nodeId:'blank',params:{prompt:'完整对白。'},validateParams:true});
+  const mismatch=await f.run('canvas.preflight',{nodeId:'blank',expected:{prompt:'不同对白'}});
+  assert.equal(mismatch.result.ok,false);
+  const pre=await f.run('canvas.preflight',{nodeId:'blank',expected:{prompt:'完整对白。'}});
+  assert.equal(pre.result.ok,true);assert.match(pre.result.digest,/^[a-f0-9]{64}$/);
+  await f.run('canvas.updateNodeParams',{nodeId:'blank',params:{prompt:'更新对白。'},validateParams:true});
+  const run=await f.run('canvas.runNode',{nodeId:'blank',expectedDigest:pre.result.digest,validateParams:true});
+  assert.equal(run.ok,false);assert.match(run.error,/EDIT_CONFLICT/);
+  assert.equal(f.requests.some(u=>u.endsWith('/task/run')),false);
+});
+
+test('prepare batch is all-or-nothing, preserves full prompts, previews and rejects duplicate IDs',async t=>{
+  const f=workflowFixture();t.after(()=>f.remoteDoc.destroy());await f.seed();
+  const shot={nodeId:'shot-1',templateNodeId:'blank',title:'First',prompt:'不要缩短——完整对白。',references:[{sourceNodeId:'a',kind:'image',parameter:'refImage1'}]};
+  const invalid=await f.run('canvas.prepareShots',{shots:[shot,{...shot,nodeId:'shot-2',params:{duration:'99'}}]});
+  assert.equal(invalid.ok,false);assert.equal(f.nodes().length,3);
+  const preview=await f.run('canvas.prepareShots',{shots:[shot],dryRun:true});
+  assert.equal(preview.ok,true,preview.error);assert.equal(f.nodes().length,3);
+  const event=await f.run('canvas.prepareShots',{shots:[shot,{...shot,nodeId:'shot-2'}],layout:{x:0,y:0,gap:100,columns:2}});
+  assert.equal(event.ok,true,event.error);assert.equal(f.nodes().length,5);assert.equal(f.edges().length,2);
+  assert.equal(f.nodes().find(n=>n.id==='shot-1').data.params.prompt,shot.prompt);
+  assert.equal((await f.run('canvas.prepareShots',{shots:[shot]})).ok,false);
+  assert.equal(f.requests.some(u=>u.endsWith('/task/run')),false);
+});
+
+test('layout keeps unselected nodes fixed and avoids variable-sized obstacles',async t=>{
+  const f=workflowFixture();t.after(()=>f.remoteDoc.destroy());await f.seed();
+  await f.run('canvas.moveNodes',{nodeIds:['blank'],positions:{blank:{x:0,y:0}}});
+  await f.run('canvas.updateNode',{nodeId:'blank',data:{width:1100,height:800}});
+  const fixed=JSON.stringify(f.nodes().find(n=>n.id==='blank'));
+  const event=await f.run('canvas.autoLayout',{nodeIds:['a','b'],x:0,y:0,gap:100,columns:2});
+  assert.equal(event.ok,true,event.error);assert.equal(JSON.stringify(f.nodes().find(n=>n.id==='blank')),fixed);
+  const selected=f.nodes().filter(n=>['a','b'].includes(n.id));
+  const obstacle=JSON.parse(fixed),ow=obstacle.data.width || 420,oh=obstacle.data.height || 380;
+  assert.ok(selected.every(n=>n.position.x>=obstacle.position.x+ow+100 || n.position.y>=obstacle.position.y+oh+100),JSON.stringify({obstacle,selected}));assert.notEqual(selected[0].position.x,selected[1].position.x);
+});

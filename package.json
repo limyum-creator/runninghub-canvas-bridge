@@ -1,6 +1,6 @@
 {
   "name": "runninghub-canvas-bridge",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "license": "Apache-2.0",
   "type": "module",
   "description": "Structured tools for RunningHub infinite canvas on international and China sites.",
@@ -33,7 +33,7 @@
   ],
   "scripts": {
     "start": "node server/server.mjs",
-    "check": "node --check server/server.mjs && node --check server/bridge-runtime.js && node --check extension/bridge-main.js && node --check scripts/rh-bridge.mjs && node --check scripts/rh-service.mjs && node --check bin/runninghub-canvas-bridge.mjs && node --check scripts/package-release.mjs && node --check extension/site-policy.js && node --check server/mcp.mjs && node --check server/archive.mjs && node --check server/media.mjs && node --check server/lumen.mjs && node --check server/bridge-client.mjs && node --check server/canvas-features.js && node --check scripts/windows-service.mjs && node --check scripts/service-runner.mjs && node --check scripts/zip.mjs",
+    "check": "node --check server/server.mjs && node --check server/bridge-runtime.js && node --check extension/bridge-main.js && node --check scripts/rh-bridge.mjs && node --check scripts/rh-service.mjs && node --check bin/runninghub-canvas-bridge.mjs && node --check scripts/package-release.mjs && node --check extension/site-policy.js && node --check server/mcp.mjs && node --check server/archive.mjs && node --check server/media.mjs && node --check server/lumen.mjs && node --check server/bridge-client.mjs && node --check server/canvas-features.js && node --check scripts/windows-service.mjs && node --check scripts/service-runner.mjs && node --check scripts/zip.mjs && node --check server/command-journal.mjs && node --check server/diagnostics.mjs",
     "bridge": "node scripts/rh-bridge.mjs",
     "cli": "node bin/runninghub-canvas-bridge.mjs",
     "release:check": "npm run check && npm pack --dry-run",

@@ -15,7 +15,7 @@ Existing completed tasks use `rh_archive_outputs` with their exact taskId and ex
 
 H3 uses native refImage/refAudio/refVideo slots and graph connections. Do not use legacy `prepare-video-node` or `generate-video-node` for H3: those retain upstream Seedance conversion logic. Empty reference slots can coexist with graph-connected assets; inspect the outgoing graph and current platform behavior before production.
 
-Deduplication is in memory for the current bridge process. A missing result, disconnected page or service restart is not evidence that generation failed; do not automatically resubmit.
+Command receipts and deduplication persist across bridge restarts. A missing result or disconnected page is not evidence that generation failed; recover the original request before deciding what to do.
 
 MCP fallback before client reload:
 
@@ -38,3 +38,14 @@ The input file contains the tool's JSON arguments. Keep private payload files ou
 5. Request IDs returned after submission are scoped to the connection and remain queryable by their returned wire ID from another connection while the bridge is running. Original caller IDs are recoverable within the original connection. Restart loses in-memory command receipts; inspect platform state before resubmitting.
 
 Windows uses the same MCP server (`node` plus an absolute path to `server/mcp.mjs`). JSON paths may use forward slashes or escaped backslashes. `RH_FFPROBE` points to ffprobe.exe; `RH_LUMEN_MCP_CONFIG` is required for optional Lumen archiving on Windows. Do not copy a Mac's local paths into a Windows client configuration.
+
+## Batch preparation and preflight (0.6)
+
+- `rh_bind_references` defaults to `mode: "merge"`. Use `mode: "replace"` with the complete reference list (or `[]` to clear). It removes live model media fields omitted from the list and old incoming edges proven to feed those fields. Text/control edges and unrelated media connections stay intact. Review `removedEdges` and the dry-run diff.
+- `rh_update_params`, parameter patches in `rh_update_node`, and `rh_batch_update_nodes` validate changed fields against the live model schema. Numeric bounds, declared data types and recognizable option lists are checked. Conditional platform rules are returned as warnings; no artistic or semantic judgment is implied.
+- `rh_prepare_shots` accepts `shots: [{nodeId, templateNodeId, title, prompt, params, references, archiveTarget?}]`, optional `layout: {x,y,gap,columns}`, and `dryRun`. Use genuinely blank configured templates and explicit unique IDs. All canvas preparation is planned and validated before one transaction. Repeating existing IDs is rejected; inspect those IDs instead of recreating the batch. It does not upload or generate. References must already exist on the canvas.
+- Optional archive destinations are bound after the canvas transaction. A failed binding returns `canvasPrepared: true` and per-node errors. Retry only `rh_set_archive_target`; do not recreate prepared nodes. Project Work registration remains the caller's responsibility.
+- `rh_preflight` accepts `nodeId` and optional `expected: {prompt, params, references: [{parameter, url, sourceNodeId}]}`. Prompt and parameter values are compared exactly; reference expectations describe the complete mapping. It returns errors, warnings, and a digest of the node and upstream graph. Pass `expectedDigest` (and optionally `expected`) to `rh_run_node`; a changed graph is rejected. Run also checks live model constraints. This does not establish pricing, visual quality, project approval, or semantic correctness.
+- `rh_auto_layout` arranges only `nodeIds` in caller order, using measured/declared sizes (fallback 420×380) and avoiding other nodes. It does not change references or prompts. Grouped canvases are rejected because their positions use parent coordinates; use explicit `rh_move_nodes` there.
+- `rh_recover_command` reads persisted receipts after service restart. Use the returned `rh-...` ID if no canvas is selected. With the same canvas selected it can also read the current target node. Completed receipts remain available; queued requests become `COMMAND_NOT_DISPATCHED`, and previously dispatched requests become `COMMAND_OUTCOME_UNKNOWN`. No request is replayed automatically. An observed current output alone cannot establish which uncertain submission created it.
+- `rh_diagnose` and CLI `doctor` check the actual bridge service environment when reachable: runtime/extension versions, browser connection, FFprobe, archive directory, and optional Lumen configuration. An offline fallback is labelled as client-process diagnostics. They do not submit generation or export login credentials.

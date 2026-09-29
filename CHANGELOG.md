@@ -1,3 +1,12 @@
+## 0.6.0
+
+- Add complete reference replacement/clearing with precise old-edge cleanup.
+- Validate parameter writes against live model schemas; add exact-input preflight and graph digest checks at submission.
+- Add atomic multi-shot canvas preparation with optional post-edit archive bindings and explicit partial binding results.
+- Persist command receipts before dispatch and after completion; preserve request IDs across reconnects without replaying uncertain work.
+- Add collision-aware local layout for ungrouped nodes.
+- Expand doctor and MCP diagnostics to inspect the actual bridge service environment on Windows/macOS/Linux.
+
 ## 0.5.0
 
 - Add platform asset browsing/search and URL-based canvas reuse.

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 // Modified 2026-09-27: international setup and complete extension hashes.
+import { diagnoseConnection } from "../server/diagnostics.mjs";
+import { BridgeClient } from "../server/bridge-client.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -152,27 +154,9 @@ const status = () => {
   });
 };
 
-const doctor = () => {
-  const health = bridgeCommand("health");
-  const preflight = bridgeCommand("preflight", args);
-  const diagnose = bridgeCommand("diagnose-extension");
-  const value = {
-    ok: preflight.ok && Boolean(parseJson(preflight.stdout)?.ok),
-    product: packageJson.name,
-    version: packageJson.version,
-    bridgeUrl,
-    issueUrl,
-    health: health.ok ? parseJson(health.stdout) : { ok: false, error: parseJson(health.stdout) || health.stderr || "Bridge server is offline." },
-    preflight: preflight.ok ? parseJson(preflight.stdout) : parseJson(preflight.stdout) || preflight.stderr,
-    extensionDiagnostics: diagnose.ok ? parseJson(diagnose.stdout) : parseJson(diagnose.stdout) || diagnose.stderr,
-    nextActions: preflight.ok ? parseJson(preflight.stdout)?.nextActions || [] : ["Start the bridge with `runninghub-canvas-bridge start`, then rerun doctor."],
-    feedback: {
-      whenBlocked: "Run `runninghub-canvas-bridge report --write` and attach the redacted report to a GitHub Issue.",
-      issueUrl
-    }
-  };
-  print(redacted(value));
-  process.exit(value.ok ? 0 : 1);
+const doctor = async () => {
+  const value=await diagnoseConnection(new BridgeClient(bridgeUrl));
+  print(value);process.exitCode=value.ok?0:1;
 };
 
 const report = () => {
@@ -229,7 +213,7 @@ if (command === "help" || command === "-h" || command === "--help") print(help()
 else if (command === "version" || command === "--version" || command === "-v") print(packageJson.version);
 else if (command === "setup" || command === "init") setup();
 else if (command === "start") start();
-else if (command === "doctor" || command === "diagnose") doctor();
+else if (command === "doctor" || command === "diagnose") await doctor();
 else if (command === "status") status();
 else if (command === "report") report();
 else if (command === "extension") extensionInfo();
