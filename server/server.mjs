@@ -1,9 +1,13 @@
+import { diagnose } from './diagnostics.mjs';
+import { BridgeClient } from './bridge-client.mjs';
+import { CommandJournal } from './command-journal.mjs';
+import { homedir } from 'node:os';
 // Modified 2026-09-27: international routing, origin restrictions and canvas-scoped writes.
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { readFile, stat, writeFile, rename, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { MediaTickets } from "./media.mjs";
 import { ArchiveManager } from "./archive.mjs";
 const mediaTickets = new MediaTickets();
@@ -32,13 +36,16 @@ if (ACCESS_FILE) {
 }
 const CLIENT_TTL = 15000;
 const PRODUCT_NAME = "runninghub-canvas-bridge";
-const PRODUCT_VERSION = "0.5.0";
+const PRODUCT_VERSION = "0.6.0";
 const BRIDGE_PROTOCOL_VERSION = "1";
 const RUNTIME_PATH = new URL("./bridge-runtime.js", import.meta.url);
 const events = [];
 const pendingCommands = new Map();
 const commandResults = new Map();
 const commandRecords = new Map();
+const journal=new CommandJournal(process.env.RH_COMMAND_DIR || join(process.env.RH_ARCHIVE_DIR || join(homedir(),'.runninghub-canvas-bridge','archives'),'commands'));
+for(const entry of journal.load()) {commandRecords.set(entry.id,entry.record);if(entry.result) commandResults.set(entry.id,entry.result);}
+const persistCommand=id=>journal.save(id,commandRecords.get(id),commandResults.get(id));
 const clients = new Map();
 const sessions = new Map();
 const canvasMutations = new Map();
@@ -255,6 +262,8 @@ const server = http.createServer(async (req, res) => {
         if (!record || record.clientId !== event.clientId) return json(res, 409, { error: "UNEXPECTED_COMMAND_RESULT" });
         commandResults.set(event.commandId, event);
         record.state = "completed";
+        record.completedAt=Date.now();
+        persistCommand(event.commandId);
         if (canvasMutations.get(record.canvasKey) === event.commandId) canvasMutations.delete(record.canvasKey);
       }
       return json(res, 200, { ok: true });
@@ -358,7 +367,7 @@ const server = http.createServer(async (req, res) => {
       command.canvasId = route.canvasId;
       command.canvasOrigin = SITE_POLICY.parseCanvas(selected.href).origin;
       delete command.access;
-      const { clientId: ignoredClient, expiresAt: ignoredExpiry, ...identity } = command;
+      const { clientId: ignoredClient, expiresAt: ignoredExpiry, sessionId: ignoredSession, ...identity } = command;
       const fingerprint = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
       const previous = commandRecords.get(command.id);
       if (previous) {
@@ -367,7 +376,8 @@ const server = http.createServer(async (req, res) => {
       }
       command.expiresAt = Date.now() + Math.min(Math.max(Number(command.queueTimeoutMs) || 30000, 1000), 60000);
       command.access = {...scope, generationEnabled:ACCESS.generationEnabled};
-      commandRecords.set(command.id, { fingerprint, clientId, state: "queued", canvasKey: SITE_POLICY.parseCanvas(selected.href).key });
+      commandRecords.set(command.id, { fingerprint, clientId, state: "queued", type:command.type, nodeId:command.nodeId || null, createdAt:Date.now(), canvasKey: SITE_POLICY.parseCanvas(selected.href).key });
+      persistCommand(command.id);
       const queue = pendingCommands.get(clientId) || [];
       queue.push(command);
       pendingCommands.set(clientId, queue);
@@ -387,6 +397,7 @@ const server = http.createServer(async (req, res) => {
         commands = commands.concat(direct.splice(0));
         pendingCommands.set(clientId, direct);
       }
+      const polledIds=commands.map(c=>c.id);
       commands = commands.filter(command => {
         const record = commandRecords.get(command.id);
         if (command.expiresAt < Date.now()) {
@@ -417,7 +428,16 @@ const server = http.createServer(async (req, res) => {
         record.state = "dispatched";
         return true;
       });
+      for(const id of polledIds) if(["dispatched","expired","rejected"].includes(commandRecords.get(id).state)) persistCommand(id);
       return json(res, 200, commands);
+    }
+
+    if (req.method === 'GET' && url.pathname === '/diagnostics') {
+      return json(res,200,{...await diagnose(new BridgeClient(`http://127.0.0.1:${PORT}`)),diagnosticContext:'bridge-service'});
+    }
+    if (req.method === "GET" && url.pathname === "/command-record") {
+      const id=url.searchParams.get('id');
+      return json(res,200,{record:commandRecords.get(id) || null,result:commandResults.get(id) || null});
     }
 
     if (req.method === "GET" && url.pathname === "/result") {

@@ -78,6 +78,7 @@ const plist = () => `<?xml version="1.0" encoding="UTF-8"?>
     <string>${xml(accessPath)}</string>
     <key>RH_BRIDGE_ALLOW_GENERATION</key>
     <string>${process.env.RH_BRIDGE_ALLOW_GENERATION === "1" ? "1" : "0"}</string>
+    ${['RH_FFPROBE','RH_LUMEN_MCP_CONFIG','RH_ARCHIVE_DIR','RH_COMMAND_DIR'].filter(key=>process.env[key]).map(key=>`<key>${key}</key><string>${xml(process.env[key])}</string>`).join('\n    ')}
   </dict>
 </dict>
 </plist>

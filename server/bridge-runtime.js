@@ -397,7 +397,7 @@
       result.nodes = result.nodes.map((node) => compactNodeSummary(node, { includeUrls: false, includeTextPreview: true, textPreviewLength: command?.textPreviewLength || 120 }));
     }
     if (Array.isArray(result?.edges)) result.edges = result.edges.map((edge) => compactEdgeSummary(edge));
-    if (Array.isArray(result?.addedEdges)) result.addedEdges = result.addedEdges.map((edge) => compactEdgeSummary(edge));
+    if (Array.isArray(result?.addedEdges)) result.addedEdges = result.addedEdges.map((edge) => typeof edge === "string" ? edge : compactEdgeSummary(edge));
     return {
       result,
       diff: compactCanvasDiff(diff),
@@ -523,6 +523,9 @@
   };
 
   const COMMAND_CAPABILITIES = [
+    {type:'canvas.preflight',description:'Validate live constraints and exact expected inputs; return graph digest.'},
+    {type:'canvas.prepareShots',description:'Prepare multiple model nodes, references and positions atomically.'},
+    {type:'canvas.autoLayout',description:'Lay out selected ungrouped nodes avoiding existing obstacles.'},
     {type:'canvas.listModels',description:'Read current platform model catalog.'},
     {type:'canvas.modelSchema',description:'Read live parameter options and constraints for a model.'},
     {type:'canvas.searchAssets',description:'Search or browse the platform asset drawer.'},
@@ -1635,14 +1638,24 @@
     return { prepared, validation, run };
   };
 
-  const runNode = async ({ nodeId, id, targetId, maxDepth = 8, maxChars = 120000, validateReferences = false, dryRun = false } = {}) => {
+  const runNode = async ({ nodeId, id, targetId, maxDepth = 8, maxChars = 120000, validateReferences = false, dryRun = false, validateParams = false, expectedDigest, expected } = {}) => {
     const target = targetId || nodeId || id;
     if (!target) throw new Error("nodeId is required");
-    const payload = await withCanvasYjs(({ nodes, edges, canvasId }) => {
+    const schemaNode=validateParams || expectedDigest || expected ? (await withCanvasYjs(ctx=>canvasSnapshotFromContext(ctx))).nodes.find(n=>n.id===target) : null;
+    const fields=schemaNode ? await featureTools.fieldsFor(schemaNode) : null;
+    const payload = await withCanvasYjs(async ({ nodes, edges, canvasId }) => {
       const currentNodes = yArrayToJson(nodes);
       const currentEdges = yArrayToJson(edges);
       const targetNode = currentNodes.find((node) => node?.id === target);
       if (!targetNode) throw new Error(`Node not found: ${target}`);
+      if(fields) {
+        if(targetNode.data?.modelCode!==schemaNode.data?.modelCode || targetNode.data?.subType!==schemaNode.data?.subType) throw new Error('EDIT_CONFLICT: model changed during validation');
+        const snapshot={nodes:currentNodes,edges:currentEdges};
+        const checked=await featureTools.preflightSnapshot(snapshot,{nodeId:target,expected},fields);
+        if(!checked.ok) throw new Error('PREFLIGHT_FAILED: '+checked.errors.join('; '));
+        if(expectedDigest && expectedDigest!==checked.digest) throw new Error('EDIT_CONFLICT: preflight digest changed');
+        if(FEATURES.canonical(snapshot)!==FEATURES.canonical({nodes:yArrayToJson(nodes),edges:yArrayToJson(edges)})) throw new Error('EDIT_CONFLICT: canvas changed during preflight');
+      }
       const validation = validateNodeRunSnapshot({ targetId: target, nodes: currentNodes, edges: currentEdges, requireReferences: validateReferences });
       if (!validation.ok) throw new Error(`Node run validation failed: ${validation.errors.join("; ")}`);
       const subgraph = collectUpstreamSubgraph({ targetId: target, nodes: currentNodes, edges: currentEdges, maxDepth: Number(maxDepth) });
@@ -2818,6 +2831,13 @@
       activeCommandAccess = command.access ? {...command.access, generationEnabled:ACCESS.generationEnabled} : ACCESS;
       const denied = SITE_POLICY.authorizeCommand(command, activeCommandAccess, SITE_POLICY.parseCanvas(location.href));
       if (denied) throw new Error(denied);
+      if(command.validateParams && ['canvas.updateNodeParams','canvas.updateNode','canvas.batchUpdate'].includes(command.type)) {
+        const updates=command.type==='canvas.batchUpdate'?command.updates:[{nodeId:command.nodeId,params:command.params || command.data?.params,modelCode:command.data?.modelCode,subType:command.data?.subType}];
+        for(const update of updates.filter(u=>u.params)) {
+          const checked=await featureTools.validatePatch({...update,expectedRevisions:command.expectedRevisions});
+          command.expectedRevisions={...command.expectedRevisions,...checked.expectedRevisions};
+        }
+      }
       const featureName=command.type?.replace(/^canvas\./,'');
       if (Object.hasOwn(featureTools,featureName)) {
         result = await featureTools[featureName](command);

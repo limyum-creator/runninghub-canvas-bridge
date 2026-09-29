@@ -47,7 +47,7 @@ export async function windowsService(action,{root=resolve(dirname(fileURLToPath(
   if(action==='uninstall') {await halt();await unlink(startup).catch(e=>{if(e.code!=='ENOENT')throw e;});return {ok:true,installed:false,retainedData:dir};}
   if(action==='install') {
     await halt();await mkdir(dir,{recursive:true});await mkdir(dirname(startup),{recursive:true});
-    const config={root,node:process.execPath,server:join(root,'server','server.mjs'),env:{NODE_ENV:'production',RH_BRIDGE_INSTANCE_ID:randomUUID(),RH_BRIDGE_ACCESS_FILE:join(dir,'access.json'),RH_BRIDGE_ALLOW_GENERATION:env.RH_BRIDGE_ALLOW_GENERATION==='1'?'1':'0',...Object.fromEntries(['RH_FFPROBE','RH_LUMEN_MCP_CONFIG','RH_ARCHIVE_DIR'].filter(k=>env[k]).map(k=>[k,env[k]]))}};
+    const config={root,node:process.execPath,server:join(root,'server','server.mjs'),env:{NODE_ENV:'production',RH_BRIDGE_INSTANCE_ID:randomUUID(),RH_BRIDGE_ACCESS_FILE:join(dir,'access.json'),RH_BRIDGE_ALLOW_GENERATION:env.RH_BRIDGE_ALLOW_GENERATION==='1'?'1':'0',...Object.fromEntries(['RH_FFPROBE','RH_LUMEN_MCP_CONFIG','RH_ARCHIVE_DIR','RH_COMMAND_DIR'].filter(k=>env[k]).map(k=>[k,env[k]]))}};
     await writeFile(configPath,JSON.stringify(config,null,2));
     const source=launcherSource(process.execPath,join(root,'scripts','service-runner.mjs'),configPath);
     // UTF-16LE is understood by Windows Script Host for non-ASCII usernames/paths.

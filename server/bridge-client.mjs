@@ -61,7 +61,7 @@ export class BridgeClient {
     }
     throw new Error("CANVAS_NOT_CONNECTED: open or refresh the selected canvas in Chrome");
   }
-  wireId(id) { return this.sessionId && !/^rh-[a-f0-9]{64}$/.test(id) ? 'rh-'+createHash('sha256').update(this.sessionId+':'+id).digest('hex') : id; }
+  wireId(id) { return this.canvasUrl && !/^rh-[a-f0-9]{64}$/.test(id) ? 'rh-'+createHash('sha256').update(this.canvasUrl+':'+id).digest('hex') : id; }
   async command(type, args = {}, { id = randomUUID(), timeoutMs = 45000 } = {}) {
     const target = await this.target();
     const command = { ...args, ...target, type, id: this.wireId(id), sessionId:this.sessionId, compactMutation: true };

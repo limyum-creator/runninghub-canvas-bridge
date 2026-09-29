@@ -16,7 +16,7 @@ test('MCP handshake, typed tools, prompts and request IDs survive transport', as
   t.after(async()=>{await client.close();await server.close();});
   assert.match(client.getInstructions(),/Lumen/);
   const {tools}=await client.listTools();
-  assert.equal(tools.length,30);
+  assert.equal(tools.length,35);
   assert.equal(tools.some(t=>/eval|api_post/.test(t.name)),false);
   assert.equal(tools.find(t=>t.name==='rh_run_node').annotations.readOnlyHint,false);
   const prompt='角色甲……请完整保留这句测试文本，包括停顿，只要——';
@@ -36,7 +36,7 @@ test('real stdio process initializes and lists tools without bridge availability
   const transport=new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../server/mcp.mjs',import.meta.url))],stderr:'pipe'});
   t.after(()=>client.close());
   await client.connect(transport);
-  assert.equal((await client.listTools()).tools.length,30);
+  assert.equal((await client.listTools()).tools.length,35);
 });
 
 test('MCP requires exact canvas selection and loopback bridge',async()=>{
